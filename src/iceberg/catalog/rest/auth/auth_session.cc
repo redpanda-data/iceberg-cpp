@@ -116,8 +116,8 @@ class OAuth2AuthSession : public AuthSession {
     }
 
     if (!client_secret_.empty()) {
-      auto result = FetchToken(client_, *noop, token_endpoint_, client_id_,
-                               client_secret_, scope_);
+      auto result =
+          FetchToken(client_, *noop, token_endpoint_, client_id_, client_secret_, scope_);
       if (!result.has_value()) {
         return AuthenticationFailed("Failed to refresh OAuth2 token: {}",
                                     result.error().message);
