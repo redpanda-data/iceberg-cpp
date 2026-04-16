@@ -176,10 +176,10 @@ Result<std::vector<ManifestFile>> SnapshotUpdate::WriteDataManifests(
   RollingManifestWriter rolling_writer(
       [this, spec, schema = std::move(current_schema),
        snapshot_id = SnapshotId()]() -> Result<std::unique_ptr<ManifestWriter>> {
-        return ManifestWriter::MakeWriter(
-            base().format_version, snapshot_id, ManifestPath(), ctx_->table->io(),
-            std::move(spec), std::move(schema), ManifestContent::kData,
-            /*first_row_id=*/base().next_row_id);
+        return ManifestWriter::MakeWriter(base().format_version, snapshot_id,
+                                          ManifestPath(), ctx_->table->io(), spec, schema,
+                                          ManifestContent::kData,
+                                          /*first_row_id=*/base().next_row_id);
       },
       target_manifest_size_bytes_);
 
@@ -202,9 +202,9 @@ Result<std::vector<ManifestFile>> SnapshotUpdate::WriteDeleteManifests(
   RollingManifestWriter rolling_writer(
       [this, spec, schema = std::move(current_schema),
        snapshot_id = SnapshotId()]() -> Result<std::unique_ptr<ManifestWriter>> {
-        return ManifestWriter::MakeWriter(
-            base().format_version, snapshot_id, ManifestPath(), ctx_->table->io(),
-            std::move(spec), std::move(schema), ManifestContent::kDeletes);
+        return ManifestWriter::MakeWriter(base().format_version, snapshot_id,
+                                          ManifestPath(), ctx_->table->io(), spec, schema,
+                                          ManifestContent::kDeletes);
       },
       target_manifest_size_bytes_);
 
