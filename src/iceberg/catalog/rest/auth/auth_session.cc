@@ -24,11 +24,8 @@
 #include <utility>
 
 #include "iceberg/catalog/rest/auth/oauth2_util.h"
-#include "iceberg/catalog/rest/error_handlers.h"
 #include "iceberg/catalog/rest/http_client.h"
-#include "iceberg/catalog/rest/json_serde_internal.h"
 #include "iceberg/catalog/rest/types.h"
-#include "iceberg/json_serde_internal.h"
 #include "iceberg/util/macros.h"
 
 namespace iceberg::rest::auth {
@@ -118,33 +115,14 @@ class OAuth2AuthSession : public AuthSession {
       // refresh_token grant failed, fall through to client_credentials
     }
 
-    // Re-fetch using client_credentials
     if (!client_secret_.empty()) {
-      // Build a minimal AuthProperties-compatible fetch
-      auto noop2 = AuthSession::MakeDefault({});
-      std::unordered_map<std::string, std::string> form_data{
-          {"grant_type", "client_credentials"},
-          {"client_id", client_id_},
-          {"client_secret", client_secret_},
-      };
-      if (!scope_.empty()) {
-        form_data.emplace("scope", scope_);
-      }
-      auto response = client_.PostForm(token_endpoint_, form_data, /*headers=*/{},
-                                       *DefaultErrorHandler::Instance(), *noop2);
-      if (!response.has_value()) {
+      auto result = FetchToken(client_, *noop, token_endpoint_, client_id_,
+                               client_secret_, scope_);
+      if (!result.has_value()) {
         return AuthenticationFailed("Failed to refresh OAuth2 token: {}",
-                                    response.error().message);
+                                    result.error().message);
       }
-      auto json = FromJsonString(response->body());
-      if (!json.has_value()) {
-        return AuthenticationFailed("Failed to parse OAuth2 token response");
-      }
-      auto token_result = FromJson<OAuthTokenResponse>(*json);
-      if (!token_result.has_value()) {
-        return AuthenticationFailed("Failed to deserialize OAuth2 token response");
-      }
-      token_ = std::move(*token_result);
+      token_ = std::move(*result);
       UpdateExpiry();
       return {};
     }
