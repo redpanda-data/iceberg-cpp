@@ -30,7 +30,7 @@ required_conan_version = ">=2.1.0"
 class IcebergCppConan(ConanFile):
     name = "iceberg-cpp"
     description = "Apache Iceberg C++ client library"
-    license = "Apache-2.0" f
+    license = "Apache-2.0"
     homepage = "https://github.com/redpanda-data/iceberg-cpp"
     url = "https://github.com/redpanda-data/iceberg-cpp"
     package_type = "static-library"
