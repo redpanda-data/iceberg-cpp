@@ -104,7 +104,7 @@ bool EqualsIgnoreCase(std::string_view a, std::string_view b) {
 }
 
 std::string ByteCursorToStdString(Aws::Crt::ByteCursor bc) {
-  return std::string(reinterpret_cast<const char*>(bc.ptr), bc.len);
+  return {reinterpret_cast<const char*>(bc.ptr), bc.len};
 }
 
 }  // namespace
