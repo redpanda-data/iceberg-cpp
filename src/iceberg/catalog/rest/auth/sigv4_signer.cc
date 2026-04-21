@@ -19,6 +19,7 @@
 
 #include "iceberg/catalog/rest/auth/sigv4_signer.h"
 
+#include <array>
 #include <future>
 #include <memory>
 #include <string>
@@ -54,9 +55,10 @@ Aws::Crt::ApiHandle& GlobalApiHandle() {
 }
 
 std::string Sha256Hex(std::string_view data) {
-  unsigned char digest[SHA256_DIGEST_LENGTH];
-  ::SHA256(reinterpret_cast<const unsigned char*>(data.data()), data.size(), digest);
-  static constexpr char kHex[] = "0123456789abcdef";
+  std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
+  ::SHA256(reinterpret_cast<const unsigned char*>(data.data()), data.size(),
+           digest.data());
+  static constexpr std::string_view kHex = "0123456789abcdef";
   std::string out(SHA256_DIGEST_LENGTH * 2, '\0');
   for (size_t i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
     out[2 * i] = kHex[digest[i] >> 4];
@@ -85,7 +87,7 @@ std::string_view ExtractPath(std::string_view url) {
       (scheme_end == std::string_view::npos) ? url : url.substr(scheme_end + 3);
   auto slash = rest.find('/');
   if (slash == std::string_view::npos) {
-    return std::string_view("/");
+    return {"/"};
   }
   return rest.substr(slash);
 }
