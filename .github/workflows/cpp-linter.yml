@@ -63,11 +63,14 @@ jobs:
         run: |
           # The conanfile.py disables tests for the package build; override
           # here so the test targets land in compile_commands.json and
-          # clang-tidy can resolve their includes (gmock/gtest).
+          # clang-tidy can resolve their includes (gmock/gtest). We also
+          # skip the arrow-heavy bundle so the lint job stays fast: the
+          # REST targets are what we need for this PR's lint coverage.
           cmake --preset conan-release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            -DICEBERG_BUILD_TESTS=ON
-          cmake --build build/Release
+            -DICEBERG_BUILD_TESTS=ON \
+            -DICEBERG_BUILD_BUNDLE=OFF
+          cmake --build build/Release --target rest_catalog_test
       - uses: cpp-linter/cpp-linter-action@0f6d1b8d7e38b584cbee606eb23d850c217d54f8
         id: linter
         continue-on-error: true
