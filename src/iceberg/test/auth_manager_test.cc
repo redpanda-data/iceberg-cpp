@@ -371,13 +371,13 @@ std::unordered_map<std::string, std::string> MinimalSigV4Properties() {
       {AuthProperties::kSigV4Region, "us-east-1"},
       {AuthProperties::kSigV4Service, "glue"},
       {AuthProperties::kSigV4AccessKeyId, "AKIAIOSFODNN7EXAMPLE"},
-      {AuthProperties::kSigV4SecretAccessKey,
-       "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"},
+      {AuthProperties::kSigV4SecretAccessKey, "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"},
   };
 }
 
 SignableRequest MakeGetRequest(std::string_view url) {
-  return SignableRequest{.method = "GET", .url = url, .query_params = nullptr, .body = {}};
+  return SignableRequest{
+      .method = "GET", .url = url, .query_params = nullptr, .body = {}};
 }
 
 }  // namespace
@@ -449,7 +449,8 @@ TEST_F(AuthManagerTest, SigV4SignsRequestHeaders) {
   EXPECT_TRUE(headers.contains("Authorization"));
   EXPECT_THAT(headers["Authorization"],
               ::testing::StartsWith("AWS4-HMAC-SHA256 Credential="));
-  EXPECT_THAT(headers["Authorization"], ::testing::HasSubstr("/us-east-1/glue/aws4_request"));
+  EXPECT_THAT(headers["Authorization"],
+              ::testing::HasSubstr("/us-east-1/glue/aws4_request"));
   EXPECT_THAT(headers["Authorization"], ::testing::HasSubstr("SignedHeaders="));
   EXPECT_THAT(headers["Authorization"], ::testing::HasSubstr("Signature="));
   EXPECT_TRUE(headers.contains("X-Amz-Date"));

@@ -17,6 +17,8 @@
  * under the License.
  */
 
+#include "iceberg/catalog/rest/auth/sigv4_signer.h"
+
 #include <chrono>
 #include <string>
 #include <unordered_map>
@@ -25,7 +27,6 @@
 #include <gtest/gtest.h>
 
 #include "iceberg/catalog/rest/auth/auth_session.h"
-#include "iceberg/catalog/rest/auth/sigv4_signer.h"
 #include "iceberg/test/matchers.h"
 
 /// SigV4 canonical-vector tests.
@@ -94,13 +95,12 @@ TEST(SigV4SignerTest, CanonicalVectorGetVanilla) {
   EXPECT_EQ(result->at("X-Amz-Date"), "20150830T123600Z");
   EXPECT_EQ(result->at("x-amz-content-sha256"),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
-  EXPECT_EQ(
-      result->at("Authorization"),
-      "AWS4-HMAC-SHA256 "
-      "Credential=AKIDEXAMPLE/20150830/us-east-1/glue/aws4_request, "
-      "SignedHeaders=host;x-amz-content-sha256;x-amz-date, "
-      "Signature="
-      "029d943d26726020757da405ee50a23ab8e28649d845d5bf69717d7246cd3f87");
+  EXPECT_EQ(result->at("Authorization"),
+            "AWS4-HMAC-SHA256 "
+            "Credential=AKIDEXAMPLE/20150830/us-east-1/glue/aws4_request, "
+            "SignedHeaders=host;x-amz-content-sha256;x-amz-date, "
+            "Signature="
+            "029d943d26726020757da405ee50a23ab8e28649d845d5bf69717d7246cd3f87");
 }
 
 // -----------------------------------------------------------------------------
@@ -128,13 +128,12 @@ TEST(SigV4SignerTest, CanonicalVectorGetWithQuery) {
   EXPECT_EQ(result->at("X-Amz-Date"), "20150830T123600Z");
   EXPECT_EQ(result->at("x-amz-content-sha256"),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
-  EXPECT_EQ(
-      result->at("Authorization"),
-      "AWS4-HMAC-SHA256 "
-      "Credential=AKIDEXAMPLE/20150830/us-east-1/glue/aws4_request, "
-      "SignedHeaders=host;x-amz-content-sha256;x-amz-date, "
-      "Signature="
-      "e82f9da81e1f789f7d55aae636026b6df73a0c23fd3ba08b6d4a7d4e01c1062c");
+  EXPECT_EQ(result->at("Authorization"),
+            "AWS4-HMAC-SHA256 "
+            "Credential=AKIDEXAMPLE/20150830/us-east-1/glue/aws4_request, "
+            "SignedHeaders=host;x-amz-content-sha256;x-amz-date, "
+            "Signature="
+            "e82f9da81e1f789f7d55aae636026b6df73a0c23fd3ba08b6d4a7d4e01c1062c");
 }
 
 // -----------------------------------------------------------------------------
@@ -162,13 +161,12 @@ TEST(SigV4SignerTest, CanonicalVectorPostJsonBody) {
   EXPECT_EQ(result->at("X-Amz-Date"), "20150830T123600Z");
   EXPECT_EQ(result->at("x-amz-content-sha256"),
             "6a2d107daab05b4284e65fac424da4093a29ad3c9726c6f3e8bf85d5daeb0e34");
-  EXPECT_EQ(
-      result->at("Authorization"),
-      "AWS4-HMAC-SHA256 "
-      "Credential=AKIDEXAMPLE/20150830/us-east-1/glue/aws4_request, "
-      "SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, "
-      "Signature="
-      "d4c36f6140f60082617e086c3945701678f24db257724d9c6392962885ecb099");
+  EXPECT_EQ(result->at("Authorization"),
+            "AWS4-HMAC-SHA256 "
+            "Credential=AKIDEXAMPLE/20150830/us-east-1/glue/aws4_request, "
+            "SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, "
+            "Signature="
+            "d4c36f6140f60082617e086c3945701678f24db257724d9c6392962885ecb099");
 }
 
 // -----------------------------------------------------------------------------

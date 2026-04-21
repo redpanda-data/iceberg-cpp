@@ -58,12 +58,10 @@ class ICEBERG_REST_EXPORT AuthProperties : public ConfigBase<AuthProperties> {
   inline static const std::string kSigV4Service = "rest.auth.sigv4.service";
   inline static const std::string kSigV4DelegateAuthType =
       "rest.auth.sigv4.delegate-auth-type";
-  inline static const std::string kSigV4AccessKeyId =
-      "rest.auth.sigv4.access-key-id";
+  inline static const std::string kSigV4AccessKeyId = "rest.auth.sigv4.access-key-id";
   inline static const std::string kSigV4SecretAccessKey =
       "rest.auth.sigv4.secret-access-key";
-  inline static const std::string kSigV4SessionToken =
-      "rest.auth.sigv4.session-token";
+  inline static const std::string kSigV4SessionToken = "rest.auth.sigv4.session-token";
   /// Selects which credential source drives SigV4 signing. Values:
   ///   "static"  — use the access-key-id/secret-access-key/session-token
   ///               properties. Best for tests and short-lived scripts.

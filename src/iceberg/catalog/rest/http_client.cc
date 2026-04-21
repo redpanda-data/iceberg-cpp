@@ -87,10 +87,8 @@ Result<cpr::Header> BuildHeaders(
   for (const auto& [key, val] : request_headers) {
     headers.insert_or_assign(key, val);
   }
-  auth::SignableRequest signable{.method = method,
-                                 .url = url,
-                                 .query_params = query_params,
-                                 .body = body};
+  auth::SignableRequest signable{
+      .method = method, .url = url, .query_params = query_params, .body = body};
   ICEBERG_RETURN_UNEXPECTED(session.Authenticate(signable, headers));
   return cpr::Header(headers.begin(), headers.end());
 }
@@ -98,7 +96,8 @@ Result<cpr::Header> BuildHeaders(
 /// \brief Serialize a form-data map to an application/x-www-form-urlencoded
 ///        body string. Used so that SigV4 can hash the payload it will
 ///        actually see on the wire.
-std::string EncodeFormBody(const std::unordered_map<std::string, std::string>& form_data) {
+std::string EncodeFormBody(
+    const std::unordered_map<std::string, std::string>& form_data) {
   std::string out;
   bool first = true;
   for (const auto& [key, val] : form_data) {
@@ -206,9 +205,9 @@ Result<HttpResponse> HttpClient::Get(
     const std::string& path, const std::unordered_map<std::string, std::string>& params,
     const std::unordered_map<std::string, std::string>& headers,
     const ErrorHandler& error_handler, auth::AuthSession& session) {
-  ICEBERG_ASSIGN_OR_RAISE(
-      auto all_headers,
-      BuildHeaders("GET", path, &params, /*body=*/{}, headers, default_headers_, session));
+  ICEBERG_ASSIGN_OR_RAISE(auto all_headers,
+                          BuildHeaders("GET", path, &params, /*body=*/{}, headers,
+                                       default_headers_, session));
   cpr::Response response = cpr::Get(cpr::Url{path}, GetParameters(params), all_headers,
                                     BuildSslOptions(ssl_config_), *connection_pool_);
 
@@ -265,9 +264,9 @@ Result<HttpResponse> HttpClient::PostForm(
 Result<HttpResponse> HttpClient::Head(
     const std::string& path, const std::unordered_map<std::string, std::string>& headers,
     const ErrorHandler& error_handler, auth::AuthSession& session) {
-  ICEBERG_ASSIGN_OR_RAISE(auto all_headers,
-                          BuildHeaders("HEAD", path, /*query_params=*/nullptr, /*body=*/{},
-                                       headers, default_headers_, session));
+  ICEBERG_ASSIGN_OR_RAISE(
+      auto all_headers, BuildHeaders("HEAD", path, /*query_params=*/nullptr, /*body=*/{},
+                                     headers, default_headers_, session));
   cpr::Response response = cpr::Head(cpr::Url{path}, all_headers,
                                      BuildSslOptions(ssl_config_), *connection_pool_);
 
@@ -281,10 +280,9 @@ Result<HttpResponse> HttpClient::Delete(
     const std::string& path, const std::unordered_map<std::string, std::string>& params,
     const std::unordered_map<std::string, std::string>& headers,
     const ErrorHandler& error_handler, auth::AuthSession& session) {
-  ICEBERG_ASSIGN_OR_RAISE(
-      auto all_headers,
-      BuildHeaders("DELETE", path, &params, /*body=*/{}, headers, default_headers_,
-                   session));
+  ICEBERG_ASSIGN_OR_RAISE(auto all_headers,
+                          BuildHeaders("DELETE", path, &params, /*body=*/{}, headers,
+                                       default_headers_, session));
   cpr::Response response = cpr::Delete(cpr::Url{path}, GetParameters(params), all_headers,
                                        BuildSslOptions(ssl_config_), *connection_pool_);
 

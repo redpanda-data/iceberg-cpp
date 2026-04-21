@@ -33,7 +33,6 @@
 #include <aws/crt/auth/Signing.h>
 #include <aws/crt/auth/Sigv4Signing.h>
 #include <aws/crt/http/HttpRequestResponse.h>
-
 #include <openssl/sha.h>
 
 #include "iceberg/catalog/rest/auth/auth_manager.h"
@@ -110,8 +109,7 @@ std::string ByteCursorToStdString(Aws::Crt::ByteCursor bc) {
 
 class SigV4Signer::Impl {
  public:
-  Impl(SigV4Config config,
-       std::shared_ptr<Aws::Crt::Auth::ICredentialsProvider> provider,
+  Impl(SigV4Config config, std::shared_ptr<Aws::Crt::Auth::ICredentialsProvider> provider,
        std::optional<std::chrono::system_clock::time_point> fixed_time)
       : config_(std::move(config)),
         provider_(std::move(provider)),
@@ -150,14 +148,16 @@ Result<std::shared_ptr<Aws::Crt::Auth::ICredentialsProvider>> BuildCredentialsPr
             "SigV4: static provider requires access-key-id and secret-access-key");
       }
       Auth::CredentialsProviderStaticConfig static_cfg;
-      static_cfg.AccessKeyId = Aws::Crt::ByteCursorFromCString(config.access_key_id.c_str());
+      static_cfg.AccessKeyId =
+          Aws::Crt::ByteCursorFromCString(config.access_key_id.c_str());
       static_cfg.SecretAccessKey =
           Aws::Crt::ByteCursorFromCString(config.secret_access_key.c_str());
       if (!config.session_token.empty()) {
         static_cfg.SessionToken =
             Aws::Crt::ByteCursorFromCString(config.session_token.c_str());
       }
-      auto provider = Auth::CredentialsProvider::CreateCredentialsProviderStatic(static_cfg);
+      auto provider =
+          Auth::CredentialsProvider::CreateCredentialsProviderStatic(static_cfg);
       if (!provider) {
         return AuthenticationFailed("SigV4: failed to build static credentials provider");
       }
@@ -168,7 +168,8 @@ Result<std::shared_ptr<Aws::Crt::Auth::ICredentialsProvider>> BuildCredentialsPr
       // The API handle we keep alive for the process owns the default
       // ClientBootstrap / EventLoopGroup / HostResolver. The default chain
       // needs them to reach IMDS and STS.
-      chain_cfg.Bootstrap = Aws::Crt::ApiHandle::GetOrCreateStaticDefaultClientBootstrap();
+      chain_cfg.Bootstrap =
+          Aws::Crt::ApiHandle::GetOrCreateStaticDefaultClientBootstrap();
       if (chain_cfg.Bootstrap == nullptr) {
         return IOError(
             "SigV4: could not create default ClientBootstrap for credentials chain");
@@ -259,8 +260,7 @@ Result<std::unordered_map<std::string, std::string>> SigV4Signer::Sign(
   // and (b) aws-c-auth can add its own Authorization header with the
   // signature. This mirrors the Java Iceberg RESTSigV4AuthSession's rename
   // to X-Iceberg-Access-Delegation.
-  static constexpr std::string_view kDelegatedAuthHeader =
-      "X-Iceberg-Access-Delegation";
+  static constexpr std::string_view kDelegatedAuthHeader = "X-Iceberg-Access-Delegation";
   std::vector<std::pair<std::string, std::string>> header_storage;
   header_storage.reserve(existing_headers.size() + 1);
   bool has_host = false;
@@ -328,8 +328,9 @@ Result<std::unordered_map<std::string, std::string>> SigV4Signer::Sign(
       [&promise](const std::shared_ptr<Http::HttpRequest>& /*signed_req*/,
                  int error_code) { promise.set_value(error_code); });
   if (!scheduled) {
-    return AuthenticationFailed("SigV4: Sigv4HttpRequestSigner::SignRequest failed to "
-                                "schedule signing");
+    return AuthenticationFailed(
+        "SigV4: Sigv4HttpRequestSigner::SignRequest failed to "
+        "schedule signing");
   }
   const int error_code = future.get();
   if (error_code != 0) {
@@ -409,8 +410,7 @@ class SigV4AuthSession : public AuthSession {
 /// \brief Manager that constructs SigV4AuthSessions for a REST catalog.
 class SigV4Manager : public AuthManager {
  public:
-  SigV4Manager(std::shared_ptr<SigV4Signer> signer,
-               std::unique_ptr<AuthManager> delegate)
+  SigV4Manager(std::shared_ptr<SigV4Signer> signer, std::unique_ptr<AuthManager> delegate)
       : signer_(std::move(signer)), delegate_(std::move(delegate)) {}
 
   Result<std::shared_ptr<AuthSession>> InitSession(
@@ -459,8 +459,8 @@ std::string GetOr(const std::unordered_map<std::string, std::string>& properties
 /// Resolve the credentials provider enum from the property value.
 /// Auto-detects when the property is unset: static if an access key is
 /// configured, default chain otherwise.
-Result<SigV4CredentialsProvider> ResolveCredentialsProvider(
-    std::string_view raw, bool have_static_keys) {
+Result<SigV4CredentialsProvider> ResolveCredentialsProvider(std::string_view raw,
+                                                            bool have_static_keys) {
   if (raw.empty()) {
     return have_static_keys ? SigV4CredentialsProvider::kStatic
                             : SigV4CredentialsProvider::kDefault;
@@ -483,8 +483,8 @@ Result<std::unique_ptr<AuthManager>> MakeSigV4Manager(
     const std::unordered_map<std::string, std::string>& properties) {
   SigV4Config sigv4_config;
   sigv4_config.region = GetOr(properties, AuthProperties::kSigV4Region, "");
-  sigv4_config.service =
-      GetOr(properties, AuthProperties::kSigV4Service, AuthProperties::kSigV4DefaultService);
+  sigv4_config.service = GetOr(properties, AuthProperties::kSigV4Service,
+                               AuthProperties::kSigV4DefaultService);
   sigv4_config.access_key_id = GetOr(properties, AuthProperties::kSigV4AccessKeyId, "");
   sigv4_config.secret_access_key =
       GetOr(properties, AuthProperties::kSigV4SecretAccessKey, "");
@@ -522,8 +522,7 @@ Result<std::unique_ptr<AuthManager>> MakeSigV4Manager(
     // AuthManagers::Load resolves the inner manager.
     std::unordered_map<std::string, std::string> delegate_properties = properties;
     delegate_properties[AuthProperties::kAuthType] = delegate_it->second;
-    ICEBERG_ASSIGN_OR_RAISE(delegate,
-                            AuthManagers::Load(name, delegate_properties));
+    ICEBERG_ASSIGN_OR_RAISE(delegate, AuthManagers::Load(name, delegate_properties));
   }
 
   return std::make_unique<SigV4Manager>(std::move(signer), std::move(delegate));
