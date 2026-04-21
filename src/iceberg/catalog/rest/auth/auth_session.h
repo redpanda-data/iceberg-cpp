@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include "iceberg/catalog/rest/iceberg_rest_export.h"
@@ -32,6 +33,24 @@
 /// \brief Authentication session interface for REST catalog.
 
 namespace iceberg::rest::auth {
+
+/// \brief A description of an outgoing HTTP request that an AuthSession may
+///        need to inspect in order to authenticate (e.g., SigV4 needs the
+///        method, URL, query params and body hash to build its canonical
+///        request). Header-only auth schemes ignore it.
+struct SignableRequest {
+  /// HTTP method, uppercase (e.g., "GET", "POST").
+  std::string_view method;
+  /// Full request URL including scheme, host, path, but *without* query
+  /// string — query parameters are passed separately so callers don't need
+  /// to re-encode them.
+  std::string_view url;
+  /// Query parameters (pre-encoding). May be null for requests that have
+  /// none. Not owned.
+  const std::unordered_map<std::string, std::string>* query_params = nullptr;
+  /// Raw request body. Empty for GET/HEAD/DELETE without a body.
+  std::string_view body;
+};
 
 /// \brief An authentication session that can authenticate outgoing HTTP requests.
 class ICEBERG_REST_EXPORT AuthSession {
@@ -52,6 +71,18 @@ class ICEBERG_REST_EXPORT AuthSession {
   ///         - IOError: Network or connection errors when reaching auth server
   ///         - RestError: HTTP errors from authentication service
   virtual Status Authenticate(std::unordered_map<std::string, std::string>& headers) = 0;
+
+  /// \brief Authenticate using full request context.
+  ///
+  /// Overloaded form used by auth schemes that need to see the request method,
+  /// URL, query parameters and body in order to compute their header value
+  /// (e.g., SigV4). The default implementation ignores the request context and
+  /// forwards to the headers-only Authenticate(), which is what every non-
+  /// signing auth scheme wants.
+  virtual Status Authenticate(const SignableRequest& /*request*/,
+                              std::unordered_map<std::string, std::string>& headers) {
+    return Authenticate(headers);
+  }
 
   /// \brief Close the session and release any resources.
   ///
