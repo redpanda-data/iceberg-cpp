@@ -33,6 +33,7 @@
 #include "iceberg/catalog/rest/http_client.h"
 #include "iceberg/catalog/rest/json_serde_internal.h"
 #include "iceberg/json_serde_internal.h"
+#include "iceberg/result.h"
 #include "iceberg/test/matchers.h"
 
 namespace iceberg::rest::auth {
@@ -357,5 +358,212 @@ TEST_F(AuthManagerTest, OAuthTokenResponseNATokenType) {
   ASSERT_THAT(result, IsOk());
   EXPECT_EQ(result->token_type, "N_A");
 }
+
+// ---- SigV4 ----
+
+#ifdef ICEBERG_REST_WITH_SIGV4
+
+namespace {
+
+std::unordered_map<std::string, std::string> MinimalSigV4Properties() {
+  return {
+      {AuthProperties::kAuthType, AuthProperties::kAuthTypeSigV4},
+      {AuthProperties::kSigV4Region, "us-east-1"},
+      {AuthProperties::kSigV4Service, "glue"},
+      {AuthProperties::kSigV4AccessKeyId, "AKIAIOSFODNN7EXAMPLE"},
+      {AuthProperties::kSigV4SecretAccessKey,
+       "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"},
+  };
+}
+
+SignableRequest MakeGetRequest(std::string_view url) {
+  return SignableRequest{.method = "GET", .url = url, .query_params = nullptr, .body = {}};
+}
+
+}  // namespace
+
+// Verifies that auth type "sigv4" resolves to a real manager (no longer
+// "NotImplemented") once credentials are supplied.
+TEST_F(AuthManagerTest, LoadSigV4AuthManager) {
+  auto properties = MinimalSigV4Properties();
+  auto manager_result = AuthManagers::Load("test-catalog", properties);
+  ASSERT_THAT(manager_result, IsOk());
+  ASSERT_NE(manager_result.value(), nullptr);
+}
+
+// Verifies that "sigv4" auth type is case-insensitive.
+TEST_F(AuthManagerTest, SigV4AuthTypeCaseInsensitive) {
+  for (const auto& auth_type : {"SIGV4", "SigV4", "sIgV4"}) {
+    auto properties = MinimalSigV4Properties();
+    properties[AuthProperties::kAuthType] = auth_type;
+    EXPECT_THAT(AuthManagers::Load("test-catalog", properties), IsOk())
+        << "Failed for auth type: " << auth_type;
+  }
+}
+
+// Required fields: missing region.
+TEST_F(AuthManagerTest, SigV4MissingRegion) {
+  auto properties = MinimalSigV4Properties();
+  properties.erase(AuthProperties::kSigV4Region);
+  auto result = AuthManagers::Load("test-catalog", properties);
+  EXPECT_THAT(result, IsError(ErrorKind::kInvalidArgument));
+}
+
+// When the user explicitly requests the static provider but omits the
+// access-key-id, we must reject the config (not silently fall back to the
+// default chain).
+TEST_F(AuthManagerTest, SigV4ExplicitStaticMissingAccessKeyId) {
+  auto properties = MinimalSigV4Properties();
+  properties.erase(AuthProperties::kSigV4AccessKeyId);
+  properties[AuthProperties::kSigV4CredentialsProvider] =
+      std::string(AuthProperties::kSigV4ProviderStatic);
+  auto result = AuthManagers::Load("test-catalog", properties);
+  EXPECT_THAT(result, IsError(ErrorKind::kInvalidArgument));
+}
+
+// Same for a missing secret: explicit static without the secret is an error.
+TEST_F(AuthManagerTest, SigV4ExplicitStaticMissingSecretAccessKey) {
+  auto properties = MinimalSigV4Properties();
+  properties.erase(AuthProperties::kSigV4SecretAccessKey);
+  properties[AuthProperties::kSigV4CredentialsProvider] =
+      std::string(AuthProperties::kSigV4ProviderStatic);
+  auto result = AuthManagers::Load("test-catalog", properties);
+  EXPECT_THAT(result, IsError(ErrorKind::kInvalidArgument));
+}
+
+// Verifies that SigV4 signs a simple GET request and populates the expected
+// AWS headers.
+TEST_F(AuthManagerTest, SigV4SignsRequestHeaders) {
+  auto properties = MinimalSigV4Properties();
+  auto manager_result = AuthManagers::Load("test-catalog", properties);
+  ASSERT_THAT(manager_result, IsOk());
+
+  auto session_result = manager_result.value()->CatalogSession(client_, properties);
+  ASSERT_THAT(session_result, IsOk());
+
+  std::unordered_map<std::string, std::string> headers;
+  auto request =
+      MakeGetRequest("https://glue.us-east-1.amazonaws.com/iceberg/v1/namespaces");
+  ASSERT_THAT(session_result.value()->Authenticate(request, headers), IsOk());
+
+  EXPECT_TRUE(headers.contains("Authorization"));
+  EXPECT_THAT(headers["Authorization"],
+              ::testing::StartsWith("AWS4-HMAC-SHA256 Credential="));
+  EXPECT_THAT(headers["Authorization"], ::testing::HasSubstr("/us-east-1/glue/aws4_request"));
+  EXPECT_THAT(headers["Authorization"], ::testing::HasSubstr("SignedHeaders="));
+  EXPECT_THAT(headers["Authorization"], ::testing::HasSubstr("Signature="));
+  EXPECT_TRUE(headers.contains("X-Amz-Date"));
+  // aws-c-auth emits this header lowercase (SigV4 spec uses lowercase in
+  // canonical form; HTTP treats it case-insensitively on the wire).
+  EXPECT_TRUE(headers.contains("x-amz-content-sha256"));
+  // No session token supplied, so X-Amz-Security-Token must NOT be set.
+  EXPECT_FALSE(headers.contains("X-Amz-Security-Token"));
+}
+
+// Verifies that the session_token surfaces as an X-Amz-Security-Token header
+// on the signed request.
+TEST_F(AuthManagerTest, SigV4IncludesSessionToken) {
+  auto properties = MinimalSigV4Properties();
+  properties[AuthProperties::kSigV4SessionToken] = "SESSION-TOKEN-12345";
+  auto manager_result = AuthManagers::Load("test-catalog", properties);
+  ASSERT_THAT(manager_result, IsOk());
+
+  auto session_result = manager_result.value()->CatalogSession(client_, properties);
+  ASSERT_THAT(session_result, IsOk());
+
+  std::unordered_map<std::string, std::string> headers;
+  auto request =
+      MakeGetRequest("https://glue.us-east-1.amazonaws.com/iceberg/v1/namespaces");
+  ASSERT_THAT(session_result.value()->Authenticate(request, headers), IsOk());
+
+  ASSERT_TRUE(headers.contains("X-Amz-Security-Token"));
+  EXPECT_EQ(headers["X-Amz-Security-Token"], "SESSION-TOKEN-12345");
+}
+
+// A SigV4 session rejects the headers-only Authenticate() overload — signing
+// is impossible without request context.
+TEST_F(AuthManagerTest, SigV4RejectsHeadersOnlyAuthenticate) {
+  auto properties = MinimalSigV4Properties();
+  auto manager_result = AuthManagers::Load("test-catalog", properties);
+  ASSERT_THAT(manager_result, IsOk());
+  auto session_result = manager_result.value()->CatalogSession(client_, properties);
+  ASSERT_THAT(session_result, IsOk());
+  std::unordered_map<std::string, std::string> headers;
+  auto status = session_result.value()->Authenticate(headers);
+  EXPECT_THAT(status, IsError(ErrorKind::kAuthenticationFailed));
+}
+
+// Using oauth2 as a SigV4 delegate: both the Bearer token (from OAuth) and
+// the SigV4 signature flow through; SigV4 overwrites Authorization (matches
+// the expected behaviour documented in the design).
+TEST_F(AuthManagerTest, SigV4WithOAuth2Delegate) {
+  auto properties = MinimalSigV4Properties();
+  properties[AuthProperties::kSigV4DelegateAuthType] = AuthProperties::kAuthTypeOAuth2;
+  properties[AuthProperties::kToken.key()] = "my-oauth-token";
+
+  auto manager_result = AuthManagers::Load("test-catalog", properties);
+  ASSERT_THAT(manager_result, IsOk());
+
+  auto session_result = manager_result.value()->CatalogSession(client_, properties);
+  ASSERT_THAT(session_result, IsOk());
+
+  std::unordered_map<std::string, std::string> headers;
+  auto request =
+      MakeGetRequest("https://glue.us-east-1.amazonaws.com/iceberg/v1/namespaces");
+  ASSERT_THAT(session_result.value()->Authenticate(request, headers), IsOk());
+
+  // SigV4 replaces Authorization with its own AWS4 signature.
+  EXPECT_THAT(headers["Authorization"],
+              ::testing::StartsWith("AWS4-HMAC-SHA256 Credential="));
+  EXPECT_TRUE(headers.contains("X-Amz-Date"));
+}
+
+// Recursive delegate (sigv4 wrapping sigv4) is rejected.
+TEST_F(AuthManagerTest, SigV4RejectsRecursiveDelegate) {
+  auto properties = MinimalSigV4Properties();
+  properties[AuthProperties::kSigV4DelegateAuthType] = AuthProperties::kAuthTypeSigV4;
+  auto result = AuthManagers::Load("test-catalog", properties);
+  EXPECT_THAT(result, IsError(ErrorKind::kInvalidArgument));
+}
+
+// Default credentials chain (env → profile → STS Web Identity → IMDS) can be
+// selected explicitly. We only verify that the manager loads and returns a
+// session — actually signing with the default chain would require real AWS
+// credentials in the test environment.
+TEST_F(AuthManagerTest, SigV4DefaultCredentialsProviderLoads) {
+  std::unordered_map<std::string, std::string> properties = {
+      {AuthProperties::kAuthType, AuthProperties::kAuthTypeSigV4},
+      {AuthProperties::kSigV4Region, "us-east-1"},
+      {AuthProperties::kSigV4Service, "glue"},
+      {AuthProperties::kSigV4CredentialsProvider,
+       std::string(AuthProperties::kSigV4ProviderDefault)},
+  };
+  auto manager_result = AuthManagers::Load("test-catalog", properties);
+  ASSERT_THAT(manager_result, IsOk());
+  auto session_result = manager_result.value()->CatalogSession(client_, properties);
+  ASSERT_THAT(session_result, IsOk());
+}
+
+// Without an access-key-id and without an explicit provider, auto-detection
+// picks the default chain — catalog loads successfully.
+TEST_F(AuthManagerTest, SigV4AutoSelectsDefaultWhenNoStaticKeys) {
+  std::unordered_map<std::string, std::string> properties = {
+      {AuthProperties::kAuthType, AuthProperties::kAuthTypeSigV4},
+      {AuthProperties::kSigV4Region, "us-east-1"},
+      {AuthProperties::kSigV4Service, "glue"},
+  };
+  auto manager_result = AuthManagers::Load("test-catalog", properties);
+  ASSERT_THAT(manager_result, IsOk());
+}
+
+// Unknown credentials-provider value is rejected.
+TEST_F(AuthManagerTest, SigV4UnknownCredentialsProvider) {
+  auto properties = MinimalSigV4Properties();
+  properties[AuthProperties::kSigV4CredentialsProvider] = "iam";
+  auto result = AuthManagers::Load("test-catalog", properties);
+  EXPECT_THAT(result, IsError(ErrorKind::kInvalidArgument));
+}
+
+#endif  // ICEBERG_REST_WITH_SIGV4
 
 }  // namespace iceberg::rest::auth
