@@ -58,6 +58,25 @@ class ICEBERG_REST_EXPORT AuthProperties : public ConfigBase<AuthProperties> {
   inline static const std::string kSigV4Service = "rest.auth.sigv4.service";
   inline static const std::string kSigV4DelegateAuthType =
       "rest.auth.sigv4.delegate-auth-type";
+  inline static const std::string kSigV4AccessKeyId = "rest.auth.sigv4.access-key-id";
+  inline static const std::string kSigV4SecretAccessKey =
+      "rest.auth.sigv4.secret-access-key";
+  inline static const std::string kSigV4SessionToken = "rest.auth.sigv4.session-token";
+  /// Selects which credential source drives SigV4 signing. Values:
+  ///   "static"  — use the access-key-id/secret-access-key/session-token
+  ///               properties. Best for tests and short-lived scripts.
+  ///   "default" — aws-crt-cpp's cached default chain:
+  ///               Environment → Profile → STS Web Identity (IRSA) → IMDSv2/ECS.
+  ///               Best for EC2/EKS/ECS deployments where creds rotate.
+  /// If unset, we infer: "static" when an access-key-id is configured,
+  /// "default" otherwise.
+  inline static const std::string kSigV4CredentialsProvider =
+      "rest.auth.sigv4.credentials-provider";
+  inline static constexpr std::string_view kSigV4ProviderStatic = "static";
+  inline static constexpr std::string_view kSigV4ProviderDefault = "default";
+  /// Default service name when rest.auth.sigv4.service is unset — matches the
+  /// Java Iceberg client, which defaults to AWS API Gateway's signing name.
+  inline static constexpr std::string_view kSigV4DefaultService = "execute-api";
 
   // ---- OAuth2 entries ----
 

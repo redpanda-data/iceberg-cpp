@@ -38,14 +38,39 @@ jobs:
       - name: Install dependencies
         shell: bash
         run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      - name: Set up Python for Conan
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Conan
+        shell: bash
+        run: |
+          pip install 'conan>=2.1.0'
+          conan profile detect --force
+      - name: Resolve Conan dependencies
+        # Pulls aws-crt-cpp so the SigV4 source compiles under clang-tidy.
+        # Other REST deps (cpr, arrow, …) still come via FetchContent below.
+        shell: bash
+        env:
+          CC: gcc-14
+          CXX: g++-14
+        run: |
+          conan install . -s build_type=Release --build=missing
       - name: Run build
         env:
           CC: gcc-14
           CXX: g++-14
         run: |
-          mkdir build && cd build
-          cmake .. -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-          cmake --build .
+          # The conanfile.py disables tests for the package build; override
+          # here so the test targets land in compile_commands.json and
+          # clang-tidy can resolve their includes (gmock/gtest). We also
+          # skip the arrow-heavy bundle so the lint job stays fast: the
+          # REST targets are what we need for this PR's lint coverage.
+          cmake --preset conan-release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DICEBERG_BUILD_TESTS=ON \
+            -DICEBERG_BUILD_BUNDLE=OFF
+          cmake --build build/Release --target rest_catalog_test
       - uses: cpp-linter/cpp-linter-action@0f6d1b8d7e38b584cbee606eb23d850c217d54f8
         id: linter
         continue-on-error: true
@@ -59,10 +84,10 @@ jobs:
           lines-changed-only: true
           thread-comments: true
           ignore: 'build|cmake_modules|ci'
-          database: build
+          database: build/Release
           verbosity: 'debug'
           # need '-fno-builtin-std-forward_like', see https://github.com/llvm/llvm-project/issues/101614
-          extra-args: '-std=c++23 -I$PWD/src -I$PWD/build/src -fno-builtin-std-forward_like'
+          extra-args: '-std=c++23 -I$PWD/src -I$PWD/build/Release/src -fno-builtin-std-forward_like'
       - name: Fail fast?!
         if: steps.linter.outputs.checks-failed != 0
         run: |

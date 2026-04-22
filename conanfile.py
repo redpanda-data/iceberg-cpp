@@ -65,6 +65,10 @@ class IcebergCppConan(ConanFile):
         self.requires("zlib/[>=1.2.11 <2]")
         self.requires("snappy/[>=1.1 <2]")
         self.requires("zstd/[>=1.5 <2]")
+        # AWS CRT (C++) — used by the REST catalog's SigV4 AuthManager to sign
+        # requests for AWS Glue's Iceberg REST endpoint. Pulls aws-c-auth,
+        # aws-c-common, aws-c-cal, aws-c-http, aws-c-io transitively.
+        self.requires("aws-crt-cpp/[>=0.26 <1]")
 
     def generate(self):
         tc = CMakeToolchain(self)
@@ -152,6 +156,7 @@ class IcebergCppConan(ConanFile):
         self.cpp_info.components["iceberg_rest"].requires = [
             "iceberg",
             "vendored_cpr",
+            "aws-crt-cpp::aws-crt-cpp"  # Conan component; CMake target is AWS::aws-crt-cpp,
         ]
 
         # Bundle (Arrow/Parquet integration)

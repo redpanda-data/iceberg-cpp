@@ -47,4 +47,10 @@ Result<std::unique_ptr<AuthManager>> MakeOAuth2Manager(
     std::string_view name,
     const std::unordered_map<std::string, std::string>& properties);
 
+/// \brief Create a SigV4 authentication manager for AWS services such as
+///        the AWS Glue Iceberg REST endpoint.
+Result<std::unique_ptr<AuthManager>> MakeSigV4Manager(
+    std::string_view name,
+    const std::unordered_map<std::string, std::string>& properties);
+
 }  // namespace iceberg::rest::auth

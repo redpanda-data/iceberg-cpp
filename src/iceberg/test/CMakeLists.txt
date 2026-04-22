@@ -223,12 +223,16 @@ if(ICEBERG_BUILD_REST)
     add_test(NAME ${test_name} COMMAND ${test_name})
   endfunction()
 
-  add_rest_iceberg_test(rest_catalog_test
-                        SOURCES
-                        auth_manager_test.cc
-                        endpoint_test.cc
-                        rest_json_serde_test.cc
-                        rest_util_test.cc)
+  set(ICEBERG_REST_TEST_SOURCES auth_manager_test.cc endpoint_test.cc
+                                rest_json_serde_test.cc rest_util_test.cc)
+  if(ICEBERG_REST_HAVE_SIGV4)
+    list(APPEND ICEBERG_REST_TEST_SOURCES sigv4_signer_test.cc)
+  endif()
+
+  add_rest_iceberg_test(rest_catalog_test SOURCES ${ICEBERG_REST_TEST_SOURCES})
+  if(ICEBERG_REST_HAVE_SIGV4)
+    target_compile_definitions(rest_catalog_test PRIVATE ICEBERG_REST_WITH_SIGV4)
+  endif()
 
   if(ICEBERG_BUILD_REST_INTEGRATION_TESTS)
     add_rest_iceberg_test(rest_catalog_integration_test

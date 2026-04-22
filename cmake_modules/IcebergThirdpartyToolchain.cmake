@@ -570,6 +570,32 @@ if(ICEBERG_BUILD_BUNDLE)
   resolve_zstd_dependency()
 endif()
 
+# ----------------------------------------------------------------------
+# aws-crt-cpp (optional, used by REST catalog SigV4 AuthManager).
+# If not found, the REST client still builds and SigV4 returns NotImplemented
+# at runtime. Install via Conan or vcpkg to enable AWS Glue integration.
+
+function(resolve_aws_crt_cpp_dependency)
+  find_package(aws-crt-cpp CONFIG QUIET)
+  if(aws-crt-cpp_FOUND)
+    list(APPEND ICEBERG_SYSTEM_DEPENDENCIES aws-crt-cpp)
+    set(ICEBERG_REST_HAVE_SIGV4
+        TRUE
+        PARENT_SCOPE)
+    message(STATUS "Found aws-crt-cpp (${aws-crt-cpp_VERSION_STRING}); enabling REST "
+                   "SigV4 auth")
+    set(ICEBERG_SYSTEM_DEPENDENCIES
+        ${ICEBERG_SYSTEM_DEPENDENCIES}
+        PARENT_SCOPE)
+  else()
+    set(ICEBERG_REST_HAVE_SIGV4
+        FALSE
+        PARENT_SCOPE)
+    message(STATUS "aws-crt-cpp not found; REST SigV4 auth will return NotImplemented")
+  endif()
+endfunction()
+
 if(ICEBERG_BUILD_REST)
   resolve_cpr_dependency()
+  resolve_aws_crt_cpp_dependency()
 endif()

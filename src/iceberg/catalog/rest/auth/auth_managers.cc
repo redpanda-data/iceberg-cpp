@@ -62,11 +62,15 @@ std::string InferAuthType(
 }
 
 AuthManagerRegistry CreateDefaultRegistry() {
-  return {
+  AuthManagerRegistry registry = {
       {AuthProperties::kAuthTypeNone, MakeNoopAuthManager},
       {AuthProperties::kAuthTypeBasic, MakeBasicAuthManager},
       {AuthProperties::kAuthTypeOAuth2, MakeOAuth2Manager},
   };
+#ifdef ICEBERG_REST_WITH_SIGV4
+  registry.emplace(AuthProperties::kAuthTypeSigV4, MakeSigV4Manager);
+#endif
+  return registry;
 }
 
 // Get the global registry of auth manager factories.

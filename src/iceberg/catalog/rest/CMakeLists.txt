@@ -33,6 +33,10 @@ set(ICEBERG_REST_SOURCES
     rest_util.cc
     types.cc)
 
+if(ICEBERG_REST_HAVE_SIGV4)
+  list(APPEND ICEBERG_REST_SOURCES auth/sigv4_signer.cc)
+endif()
+
 set(ICEBERG_REST_STATIC_BUILD_INTERFACE_LIBS)
 set(ICEBERG_REST_SHARED_BUILD_INTERFACE_LIBS)
 set(ICEBERG_REST_STATIC_INSTALL_INTERFACE_LIBS)
@@ -51,9 +55,23 @@ list(APPEND
      "$<IF:$<TARGET_EXISTS:iceberg::iceberg_shared>,iceberg::iceberg_shared,iceberg::iceberg_static>"
      "$<IF:$<BOOL:${CPR_VENDORED}>,iceberg::cpr,cpr::cpr>")
 
+if(ICEBERG_REST_HAVE_SIGV4)
+  list(APPEND ICEBERG_REST_STATIC_BUILD_INTERFACE_LIBS AWS::aws-crt-cpp)
+  list(APPEND ICEBERG_REST_SHARED_BUILD_INTERFACE_LIBS AWS::aws-crt-cpp)
+  list(APPEND ICEBERG_REST_STATIC_INSTALL_INTERFACE_LIBS AWS::aws-crt-cpp)
+  list(APPEND ICEBERG_REST_SHARED_INSTALL_INTERFACE_LIBS AWS::aws-crt-cpp)
+endif()
+
+set(ICEBERG_REST_DEFINITIONS)
+if(ICEBERG_REST_HAVE_SIGV4)
+  list(APPEND ICEBERG_REST_DEFINITIONS ICEBERG_REST_WITH_SIGV4)
+endif()
+
 add_iceberg_lib(iceberg_rest
                 SOURCES
                 ${ICEBERG_REST_SOURCES}
+                DEFINITIONS
+                ${ICEBERG_REST_DEFINITIONS}
                 SHARED_LINK_LIBS
                 ${ICEBERG_REST_SHARED_BUILD_INTERFACE_LIBS}
                 STATIC_LINK_LIBS
