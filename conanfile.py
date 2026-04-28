@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 import os
+import textwrap
 
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
@@ -22,6 +23,7 @@ from conan.tools.files import (
     copy,
     rm,
     rmdir,
+    save,
 )
 
 required_conan_version = ">=2.1.0"
@@ -35,8 +37,19 @@ class IcebergCppConan(ConanFile):
     url = "https://github.com/redpanda-data/iceberg-cpp"
     package_type = "static-library"
     settings = "os", "arch", "compiler", "build_type"
-    options = {"fPIC": [True, False]}
-    default_options = {"fPIC": True}
+    options = {
+        "fPIC": [True, False],
+        # "vendored": fetch and build avro-cpp inside this package (default,
+        # matches upstream behavior). "external": require avro-cpp as a Conan
+        # dependency and disable the FetchContent fallback. Use "external" when
+        # the consumer also links its own avro-cpp to avoid duplicate-symbol
+        # collisions.
+        "with_avro": ["vendored", "external"],
+    }
+    default_options = {
+        "fPIC": True,
+        "with_avro": "vendored",
+    }
 
     def export_sources(self):
         for pattern in [
@@ -62,6 +75,8 @@ class IcebergCppConan(ConanFile):
         self.requires("arrow/22.0.0", transitive_headers=True)
         self.requires("libcurl/[>=7.78 <9]")
         self.requires("openssl/[>=1.1 <4]")
+        # zlib/snappy/zstd are needed both by iceberg's own code (gzip-compressed
+        # manifests, etc.) and the vendored avro build path.
         self.requires("zlib/[>=1.2.11 <2]")
         self.requires("snappy/[>=1.1 <2]")
         self.requires("zstd/[>=1.5 <2]")
@@ -69,6 +84,16 @@ class IcebergCppConan(ConanFile):
         # requests for AWS Glue's Iceberg REST endpoint. Pulls aws-c-auth,
         # aws-c-common, aws-c-cal, aws-c-http, aws-c-io transitively.
         self.requires("aws-crt-cpp/[>=0.26 <1]")
+
+        if self.options.with_avro == "external":
+            # Pinned to match the GIT_TAG referenced in
+            # cmake_modules/IcebergThirdpartyToolchain.cmake. Bumping the
+            # tag and this require together keeps iceberg-bundle's headers
+            # and the consumer's avro-cpp on the same ABI.
+            self.requires(
+                "libavrocpp/1.13.0-iceberg-pin@oxla/stable",
+                transitive_headers=True,
+            )
 
     def generate(self):
         tc = CMakeToolchain(self)
@@ -78,6 +103,28 @@ class IcebergCppConan(ConanFile):
         tc.variables["ICEBERG_BUILD_STATIC"] = True
         tc.variables["ICEBERG_BUILD_SHARED"] = False
         tc.variables["CMAKE_FIND_USE_PACKAGE_REGISTRY"] = False
+
+        if self.options.with_avro == "external":
+            # Bridge the Conan avro-cpp target name (avro-cpp::avrocpp_s) to
+            # the one iceberg-bundle's CMake links against
+            # (avro-cpp::avrocpp_static). Loaded via CMAKE_PROJECT_<name>_INCLUDE
+            # so it runs immediately after `project(Iceberg ...)`.
+            shim = textwrap.dedent("""\
+                find_package(avro-cpp CONFIG REQUIRED)
+                if(TARGET avro-cpp::avrocpp_s AND NOT TARGET avro-cpp::avrocpp_static)
+                  add_library(avro-cpp::avrocpp_static INTERFACE IMPORTED)
+                  target_link_libraries(avro-cpp::avrocpp_static
+                                        INTERFACE avro-cpp::avrocpp_s)
+                endif()
+            """)
+            shim_path = os.path.join(
+                self.generators_folder, "iceberg_avro_alias.cmake"
+            )
+            save(self, shim_path, shim)
+            tc.variables["CMAKE_PROJECT_Iceberg_INCLUDE"] = shim_path.replace(
+                "\\", "/"
+            )
+
         # GCC false positive: inlining std::expected<T, Error> destructor in
         # json_internal.cc makes GCC think Error::~Error() frees a non-heap
         # pointer.  Same family as https://gcc.gnu.org/bugzilla/show_bug.cgi?id=118867
@@ -129,14 +176,15 @@ class IcebergCppConan(ConanFile):
             "iceberg_vendored_croaring",
         ]
 
-        self.cpp_info.components["vendored_avrocpp"].libs = [
-            "iceberg_vendored_avrocpp",
-        ]
-        self.cpp_info.components["vendored_avrocpp"].requires = [
-            "zlib::zlib",
-            "snappy::snappy",
-            "zstd::zstd",
-        ]
+        if self.options.with_avro == "vendored":
+            self.cpp_info.components["vendored_avrocpp"].libs = [
+                "iceberg_vendored_avrocpp",
+            ]
+            self.cpp_info.components["vendored_avrocpp"].requires = [
+                "zlib::zlib",
+                "snappy::snappy",
+                "zstd::zstd",
+            ]
 
         self.cpp_info.components["vendored_cpr"].libs = ["iceberg_vendored_cpr"]
         self.cpp_info.components["vendored_cpr"].requires = [
@@ -149,6 +197,9 @@ class IcebergCppConan(ConanFile):
         self.cpp_info.components["iceberg"].requires = [
             "vendored_nanoarrow",
             "vendored_croaring",
+            "zlib::zlib",
+            "snappy::snappy",
+            "zstd::zstd",
         ]
 
         # REST catalog support
@@ -160,10 +211,15 @@ class IcebergCppConan(ConanFile):
         ]
 
         # Bundle (Arrow/Parquet integration)
+        avro_requirement = (
+            "vendored_avrocpp"
+            if self.options.with_avro == "vendored"
+            else "libavrocpp::libavrocpp"
+        )
         self.cpp_info.components["iceberg_bundle"].libs = ["iceberg_bundle"]
         self.cpp_info.components["iceberg_bundle"].requires = [
             "iceberg",
             "arrow::libarrow",
             "arrow::libparquet",
-            "vendored_avrocpp",
+            avro_requirement,
         ]
