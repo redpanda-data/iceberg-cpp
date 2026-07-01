@@ -17,9 +17,9 @@
  * under the License.
  */
 
-#include "iceberg/catalog/rest/http_client.h"
-
 #include <gtest/gtest.h>
+
+#include "iceberg/catalog/rest/http_client.h"
 
 namespace iceberg::rest {
 

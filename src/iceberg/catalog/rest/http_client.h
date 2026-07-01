@@ -84,8 +84,8 @@ struct ICEBERG_REST_EXPORT SslConfig {
 ///
 /// Recognized keys: "ssl.verify" (true unless the value is exactly "false"),
 /// "ssl.ca-info", "ssl.ca-path", "ssl.crl-file". Absent keys leave defaults.
-ICEBERG_REST_EXPORT SslConfig SslConfigFromProperties(
-    const std::unordered_map<std::string, std::string>& properties);
+ICEBERG_REST_EXPORT SslConfig
+SslConfigFromProperties(const std::unordered_map<std::string, std::string>& properties);
 
 /// \brief HTTP client for making requests to Iceberg REST Catalog API.
 class ICEBERG_REST_EXPORT HttpClient {
