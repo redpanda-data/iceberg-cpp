@@ -90,7 +90,8 @@ SslConfigFromProperties(const std::unordered_map<std::string, std::string>& prop
 /// \brief HTTP client for making requests to Iceberg REST Catalog API.
 class ICEBERG_REST_EXPORT HttpClient {
  public:
-  explicit HttpClient(std::unordered_map<std::string, std::string> default_headers = {});
+  explicit HttpClient(std::unordered_map<std::string, std::string> default_headers = {},
+                      SslConfig ssl_config = {});
   ~HttpClient();
 
   HttpClient(const HttpClient&) = delete;
@@ -132,6 +133,7 @@ class ICEBERG_REST_EXPORT HttpClient {
 
  private:
   std::unordered_map<std::string, std::string> default_headers_;
+  SslConfig ssl_config_;
   std::unique_ptr<cpr::ConnectionPool> connection_pool_;
 };
 

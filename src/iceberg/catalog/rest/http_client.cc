@@ -70,6 +70,22 @@ constexpr std::string_view kSslCaInfoKey = "ssl.ca-info";
 constexpr std::string_view kSslCaPathKey = "ssl.ca-path";
 constexpr std::string_view kSslCrlFileKey = "ssl.crl-file";
 
+cpr::SslOptions BuildSslOptions(const SslConfig& config) {
+  cpr::SslOptions opts;
+  opts.verify_host = config.verify;
+  opts.verify_peer = config.verify;
+  if (!config.ca_info.empty()) {
+    opts.ca_info = config.ca_info;
+  }
+  if (!config.ca_path.empty()) {
+    opts.ca_path = config.ca_path;
+  }
+  if (!config.crl_file.empty()) {
+    opts.crl_file = config.crl_file;
+  }
+  return opts;
+}
+
 /// \brief Default error type for unparseable REST responses.
 constexpr std::string_view kRestExceptionType = "RESTException";
 
@@ -177,8 +193,10 @@ SslConfig SslConfigFromProperties(
   return ssl;
 }
 
-HttpClient::HttpClient(std::unordered_map<std::string, std::string> default_headers)
+HttpClient::HttpClient(std::unordered_map<std::string, std::string> default_headers,
+                       SslConfig ssl_config)
     : default_headers_{std::move(default_headers)},
+      ssl_config_{std::move(ssl_config)},
       connection_pool_{std::make_unique<cpr::ConnectionPool>()} {
   // Set default Content-Type for all requests (including GET/HEAD/DELETE).
   // Many systems require that content type is set regardless and will fail,
@@ -197,8 +215,9 @@ Result<HttpResponse> HttpClient::Get(
   ICEBERG_ASSIGN_OR_RAISE(auto authenticated,
                           AuthenticateRequest(session, HttpMethod::kGet, std::move(url),
                                               MergeHeaders(default_headers_, headers)));
-  cpr::Response response = cpr::Get(cpr::Url{authenticated.url},
-                                    ToCprHeader(authenticated), *connection_pool_);
+  cpr::Response response =
+      cpr::Get(cpr::Url{authenticated.url}, ToCprHeader(authenticated),
+               BuildSslOptions(ssl_config_), *connection_pool_);
 
   ICEBERG_RETURN_UNEXPECTED(HandleFailureResponse(response, error_handler));
   HttpResponse http_response;
@@ -214,9 +233,9 @@ Result<HttpResponse> HttpClient::Post(
       auto authenticated,
       AuthenticateRequest(session, HttpMethod::kPost, path,
                           MergeHeaders(default_headers_, headers), body));
-  cpr::Response response =
-      cpr::Post(cpr::Url{authenticated.url}, cpr::Body{authenticated.body},
-                ToCprHeader(authenticated), *connection_pool_);
+  cpr::Response response = cpr::Post(
+      cpr::Url{authenticated.url}, cpr::Body{authenticated.body},
+      ToCprHeader(authenticated), BuildSslOptions(ssl_config_), *connection_pool_);
 
   ICEBERG_RETURN_UNEXPECTED(HandleFailureResponse(response, error_handler));
   HttpResponse http_response;
@@ -244,9 +263,9 @@ Result<HttpResponse> HttpClient::PostForm(
       AuthenticateRequest(session, HttpMethod::kPost, path,
                           MergeHeaders(default_headers_, form_headers),
                           std::move(encoded_body)));
-  cpr::Response response =
-      cpr::Post(cpr::Url{authenticated.url}, cpr::Body{authenticated.body},
-                ToCprHeader(authenticated), *connection_pool_);
+  cpr::Response response = cpr::Post(
+      cpr::Url{authenticated.url}, cpr::Body{authenticated.body},
+      ToCprHeader(authenticated), BuildSslOptions(ssl_config_), *connection_pool_);
 
   ICEBERG_RETURN_UNEXPECTED(HandleFailureResponse(response, error_handler));
   HttpResponse http_response;
@@ -260,8 +279,9 @@ Result<HttpResponse> HttpClient::Head(
   ICEBERG_ASSIGN_OR_RAISE(auto authenticated,
                           AuthenticateRequest(session, HttpMethod::kHead, path,
                                               MergeHeaders(default_headers_, headers)));
-  cpr::Response response = cpr::Head(cpr::Url{authenticated.url},
-                                     ToCprHeader(authenticated), *connection_pool_);
+  cpr::Response response =
+      cpr::Head(cpr::Url{authenticated.url}, ToCprHeader(authenticated),
+                BuildSslOptions(ssl_config_), *connection_pool_);
 
   ICEBERG_RETURN_UNEXPECTED(HandleFailureResponse(response, error_handler));
   HttpResponse http_response;
@@ -278,8 +298,9 @@ Result<HttpResponse> HttpClient::Delete(
       auto authenticated,
       AuthenticateRequest(session, HttpMethod::kDelete, std::move(url),
                           MergeHeaders(default_headers_, headers)));
-  cpr::Response response = cpr::Delete(cpr::Url{authenticated.url},
-                                       ToCprHeader(authenticated), *connection_pool_);
+  cpr::Response response =
+      cpr::Delete(cpr::Url{authenticated.url}, ToCprHeader(authenticated),
+                  BuildSslOptions(ssl_config_), *connection_pool_);
 
   ICEBERG_RETURN_UNEXPECTED(HandleFailureResponse(response, error_handler));
   HttpResponse http_response;
