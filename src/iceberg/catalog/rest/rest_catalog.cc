@@ -76,7 +76,8 @@ Result<CatalogConfig> FetchServerConfig(const ResourcePaths& paths,
                                         const RestCatalogProperties& current_config,
                                         auth::AuthSession& session) {
   ICEBERG_ASSIGN_OR_RAISE(auto config_path, paths.Config());
-  HttpClient client(current_config.ExtractHeaders());
+  HttpClient client(current_config.ExtractHeaders(),
+                    SslConfigFromProperties(current_config.configs()));
 
   // Send the client's warehouse location to the service to keep in sync.
   // This is needed for cases where the warehouse is configured client side, but may
@@ -388,7 +389,8 @@ Result<std::shared_ptr<RestCatalog>> RestCatalog::Make(
                           config.Get(RestCatalogProperties::kNamespaceSeparator)));
 
   // Create init session for fetching server configuration
-  HttpClient init_client(config.ExtractHeaders());
+  HttpClient init_client(config.ExtractHeaders(),
+                         SslConfigFromProperties(config.configs()));
   ICEBERG_ASSIGN_OR_RAISE(auto init_session,
                           auth_manager->InitSession(init_client, config.configs()));
   ICEBERG_ASSIGN_OR_RAISE(auto server_config,
@@ -419,7 +421,8 @@ Result<std::shared_ptr<RestCatalog>> RestCatalog::Make(
   // Get snapshot loading mode
   ICEBERG_ASSIGN_OR_RAISE(auto snapshot_mode, final_config.SnapshotLoadingMode());
 
-  auto client = std::make_unique<HttpClient>(final_config.ExtractHeaders());
+  auto client = std::make_unique<HttpClient>(
+      final_config.ExtractHeaders(), SslConfigFromProperties(final_config.configs()));
   ICEBERG_ASSIGN_OR_RAISE(auto catalog_session,
                           auth_manager->CatalogSession(*client, final_config.configs()));
 
