@@ -304,7 +304,8 @@ if(ICEBERG_BUILD_REST)
                         endpoint_test.cc
                         rest_file_io_test.cc
                         rest_json_serde_test.cc
-                        rest_util_test.cc)
+                        rest_util_test.cc
+                        http_client_ssl_test.cc)
 
   if(ICEBERG_SIGV4)
     add_rest_iceberg_test(sigv4_auth_test SOURCES sigv4_auth_test.cc)

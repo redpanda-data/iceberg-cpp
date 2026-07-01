@@ -20,6 +20,7 @@
 #include "iceberg/catalog/rest/http_client.h"
 
 #include <map>
+#include <string_view>
 
 #include <cpr/cpr.h>
 
@@ -63,6 +64,11 @@ std::unordered_map<std::string, std::string> HttpResponse::headers() const {
 }
 
 namespace {
+
+constexpr std::string_view kSslVerifyKey = "ssl.verify";
+constexpr std::string_view kSslCaInfoKey = "ssl.ca-info";
+constexpr std::string_view kSslCaPathKey = "ssl.ca-path";
+constexpr std::string_view kSslCrlFileKey = "ssl.crl-file";
 
 /// \brief Default error type for unparseable REST responses.
 constexpr std::string_view kRestExceptionType = "RESTException";
@@ -152,6 +158,24 @@ Status HandleFailureResponse(const cpr::Response& response,
 }
 
 }  // namespace
+
+SslConfig SslConfigFromProperties(
+    const std::unordered_map<std::string, std::string>& properties) {
+  SslConfig ssl;
+  if (auto it = properties.find(std::string(kSslVerifyKey)); it != properties.end()) {
+    ssl.verify = it->second != "false";
+  }
+  if (auto it = properties.find(std::string(kSslCaInfoKey)); it != properties.end()) {
+    ssl.ca_info = it->second;
+  }
+  if (auto it = properties.find(std::string(kSslCaPathKey)); it != properties.end()) {
+    ssl.ca_path = it->second;
+  }
+  if (auto it = properties.find(std::string(kSslCrlFileKey)); it != properties.end()) {
+    ssl.crl_file = it->second;
+  }
+  return ssl;
+}
 
 HttpClient::HttpClient(std::unordered_map<std::string, std::string> default_headers)
     : default_headers_{std::move(default_headers)},

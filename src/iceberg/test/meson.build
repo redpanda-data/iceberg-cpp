@@ -138,6 +138,7 @@ if get_option('rest').enabled()
                 'auth_manager_test.cc',
                 'endpoint_test.cc',
                 'error_handlers_test.cc',
+                'http_client_ssl_test.cc',
                 'rest_file_io_test.cc',
                 'rest_json_serde_test.cc',
                 'rest_util_test.cc',
