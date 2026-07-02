@@ -65,6 +65,7 @@ class OAuth2AuthSession : public AuthSession,
     std::string scope;
     std::unordered_map<std::string, std::string> optional_oauth_params;
     bool keep_refreshed;
+    int64_t expiry_margin_seconds;
   };
 
   /// \brief Create an OAuth2 session and optionally schedule refresh.
@@ -256,9 +257,10 @@ class OAuth2AuthSession : public AuthSession,
 
     auto expires_in =
         std::chrono::duration_cast<std::chrono::milliseconds>(expires_at_ - now);
-    // Refresh window: 10% of remaining time, capped at 5 minutes
-    auto refresh_window = std::min(expires_in / 10, std::chrono::milliseconds(300'000));
-    auto wait_time = expires_in - refresh_window;
+    // Refresh the configured margin before expiry (matches the documented
+    // meaning of oauth2.token-refresh-margin-seconds).
+    auto margin = std::chrono::seconds(config_.expiry_margin_seconds);
+    auto wait_time = expires_in - margin;
     return std::max(wait_time, std::chrono::milliseconds(10));
   }
 
@@ -289,7 +291,7 @@ Result<std::shared_ptr<AuthSession>> AuthSession::MakeOAuth2(
     const std::string& client_id, const std::string& client_secret,
     const std::string& scope, bool keep_refreshed,
     const std::unordered_map<std::string, std::string>& optional_oauth_params,
-    HttpClient& client) {
+    HttpClient& client, int64_t expiry_margin_seconds) {
   OAuth2AuthSession::Config config{
       .token_endpoint = token_endpoint,
       .client_id = client_id,
@@ -297,6 +299,7 @@ Result<std::shared_ptr<AuthSession>> AuthSession::MakeOAuth2(
       .scope = scope,
       .optional_oauth_params = optional_oauth_params,
       .keep_refreshed = keep_refreshed,
+      .expiry_margin_seconds = expiry_margin_seconds,
   };
   ICEBERG_ASSIGN_OR_RAISE(
       auto session, OAuth2AuthSession::Make(initial_token, std::move(config), client));

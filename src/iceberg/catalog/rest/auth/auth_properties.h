@@ -79,6 +79,8 @@ class ICEBERG_REST_EXPORT AuthProperties : public ConfigBase<AuthProperties> {
                                                     "v1/oauth/tokens"};
   inline static Entry<bool> kKeepRefreshed{"token-refresh-enabled", true};
   inline static Entry<bool> kExchangeEnabled{"token-exchange-enabled", true};
+  inline static Entry<int64_t> kExpiryMarginSeconds{"oauth2.token-refresh-margin-seconds",
+                                                    300};
   inline static Entry<std::string> kAudience{"audience", ""};
   inline static Entry<std::string> kResource{"resource", ""};
 
@@ -98,6 +100,8 @@ class ICEBERG_REST_EXPORT AuthProperties : public ConfigBase<AuthProperties> {
   bool keep_refreshed() const { return Get(kKeepRefreshed); }
   /// \brief Whether token exchange is enabled.
   bool exchange_enabled() const { return Get(kExchangeEnabled); }
+  /// \brief Seconds before expiry at which to refresh the OAuth2 token.
+  int64_t expiry_margin_seconds() const { return Get(kExpiryMarginSeconds); }
 
   /// \brief Parsed client_id from credential (empty if no colon).
   const std::string& client_id() const { return client_id_; }

@@ -90,13 +90,14 @@ class ICEBERG_REST_EXPORT AuthSession {
   /// \param optional_oauth_params Optional OAuth params (audience, resource) for refresh.
   /// \param client HTTP client for making refresh requests. The caller owns the
   ///        client and must keep it alive until the session is closed.
+  /// \param expiry_margin_seconds Seconds before expiry at which to refresh the token.
   /// \return A new session that manages token lifecycle automatically.
   static Result<std::shared_ptr<AuthSession>> MakeOAuth2(
       const OAuthTokenResponse& initial_token, const std::string& token_endpoint,
       const std::string& client_id, const std::string& client_secret,
       const std::string& scope, bool keep_refreshed,
       const std::unordered_map<std::string, std::string>& optional_oauth_params,
-      HttpClient& client);
+      HttpClient& client, int64_t expiry_margin_seconds = 300);
 };
 
 }  // namespace iceberg::rest::auth
