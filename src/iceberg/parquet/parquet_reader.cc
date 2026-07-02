@@ -26,6 +26,7 @@
 #include <arrow/record_batch.h>
 #include <arrow/result.h>
 #include <arrow/type.h>
+#include <arrow/util/config.h>
 #include <arrow/util/key_value_metadata.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/schema.h>
@@ -123,8 +124,16 @@ class ParquetReader::Impl {
     ICEBERG_ASSIGN_OR_RAISE(input_stream_, OpenInputStream(options));
     auto file_reader =
         ::parquet::ParquetFileReader::Open(input_stream_, reader_properties);
+    // Arrow >= 23 provides (and prefers) the arrow::Result-returning overload and
+    // deprecates the out-parameter form; Arrow 22 only has the out-parameter form.
+#if ARROW_VERSION_MAJOR >= 23
+    ICEBERG_ARROW_ASSIGN_OR_RETURN(
+        reader_, ::parquet::arrow::FileReader::Make(pool_, std::move(file_reader),
+                                                    arrow_reader_properties));
+#else
     ICEBERG_ARROW_RETURN_NOT_OK(::parquet::arrow::FileReader::Make(
         pool_, std::move(file_reader), arrow_reader_properties, &reader_));
+#endif
 
     // Project read schema onto the Parquet file schema
     ICEBERG_ASSIGN_OR_RAISE(projection_, BuildProjection(reader_.get(), *read_schema_));
