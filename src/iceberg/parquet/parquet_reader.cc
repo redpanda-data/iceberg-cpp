@@ -123,9 +123,8 @@ class ParquetReader::Impl {
     ICEBERG_ASSIGN_OR_RAISE(input_stream_, OpenInputStream(options));
     auto file_reader =
         ::parquet::ParquetFileReader::Open(input_stream_, reader_properties);
-    ICEBERG_ARROW_ASSIGN_OR_RETURN(
-        reader_, ::parquet::arrow::FileReader::Make(pool_, std::move(file_reader),
-                                                    arrow_reader_properties));
+    ICEBERG_ARROW_RETURN_NOT_OK(::parquet::arrow::FileReader::Make(
+        pool_, std::move(file_reader), arrow_reader_properties, &reader_));
 
     // Project read schema onto the Parquet file schema
     ICEBERG_ASSIGN_OR_RAISE(projection_, BuildProjection(reader_.get(), *read_schema_));
