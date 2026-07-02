@@ -53,6 +53,16 @@ class ICEBERG_REST_EXPORT RestCatalog final
   /// \brief Create a RestCatalog instance.
   static Result<std::shared_ptr<RestCatalog>> Make(const RestCatalogProperties& config);
 
+  /// \brief Create a RestCatalog instance that routes all FileIO through the
+  /// supplied instance instead of constructing one from properties.
+  ///
+  /// When \p file_io is non-null it is used for the catalog and for every table
+  /// (bypassing MakeCatalogFileIO / MakeTableFileIO). Used to plug in a
+  /// host-provided filesystem. A null \p file_io behaves like the single-argument
+  /// overload.
+  static Result<std::shared_ptr<RestCatalog>> Make(const RestCatalogProperties& config,
+                                                   std::shared_ptr<FileIO> file_io);
+
   std::string_view name() const override;
 
   Result<std::shared_ptr<Catalog>> AsCatalog() override;
@@ -184,6 +194,7 @@ class ICEBERG_REST_EXPORT RestCatalog final
   SnapshotMode snapshot_mode_;
   SessionContext default_context_;
   std::weak_ptr<Catalog> default_catalog_;
+  bool use_injected_file_io_ = false;
 };
 
 }  // namespace iceberg::rest

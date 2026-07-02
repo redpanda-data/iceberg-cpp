@@ -377,6 +377,11 @@ RestCatalog::~RestCatalog() {
 
 Result<std::shared_ptr<RestCatalog>> RestCatalog::Make(
     const RestCatalogProperties& config) {
+  return Make(config, /*file_io=*/nullptr);
+}
+
+Result<std::shared_ptr<RestCatalog>> RestCatalog::Make(
+    const RestCatalogProperties& config, std::shared_ptr<FileIO> injected_file_io) {
   ICEBERG_ASSIGN_OR_RAISE(auto uri, config.Uri());
 
   std::string catalog_name = config.Get(RestCatalogProperties::kName);
@@ -426,14 +431,21 @@ Result<std::shared_ptr<RestCatalog>> RestCatalog::Make(
   ICEBERG_ASSIGN_OR_RAISE(auto catalog_session,
                           auth_manager->CatalogSession(*client, final_config.configs()));
 
-  // Create FileIO with the final configuration
-  ICEBERG_ASSIGN_OR_RAISE(auto file_io, MakeCatalogFileIO(final_config));
+  // Use the injected FileIO if provided, otherwise create one from the final
+  // configuration.
+  const bool use_injected = injected_file_io != nullptr;
+  std::shared_ptr<FileIO> file_io = std::move(injected_file_io);
+  if (!use_injected) {
+    ICEBERG_ASSIGN_OR_RAISE(file_io, MakeCatalogFileIO(final_config));
+  }
 
   auto default_context = SessionContext::Empty();
-  return std::shared_ptr<RestCatalog>(new RestCatalog(
+  auto catalog = std::shared_ptr<RestCatalog>(new RestCatalog(
       std::move(final_config), std::move(file_io), std::move(client), std::move(paths),
       std::move(endpoints), std::move(auth_manager), std::move(catalog_session),
       snapshot_mode, std::move(default_context)));
+  catalog->use_injected_file_io_ = use_injected;
+  return catalog;
 }
 
 RestCatalog::RestCatalog(RestCatalogProperties config, std::shared_ptr<FileIO> file_io,
@@ -492,7 +504,7 @@ Result<std::shared_ptr<FileIO>> RestCatalog::TableFileIO(
     const SessionContext& /*context*/,
     const std::unordered_map<std::string, std::string>& table_config,
     const std::vector<StorageCredential>& storage_credentials) const {
-  if (!table_config.empty() || !storage_credentials.empty()) {
+  if (!use_injected_file_io_ && (!table_config.empty() || !storage_credentials.empty())) {
     return MakeTableFileIO(config_.configs(), table_config, storage_credentials);
   }
 
