@@ -17,6 +17,7 @@
 
 install_headers(
     [
+        'base64.h',
         'bucket_util.h',
         'checked_cast.h',
         'config.h',
@@ -26,15 +27,20 @@ install_headers(
         'decimal.h',
         'endian.h',
         'error_collector.h',
+        'executor.h',
         'formattable.h',
         'formatter.h',
+        'functional.h',
         'int128.h',
         'lazy.h',
         'location_util.h',
         'macros.h',
         'partition_value_util.h',
         'property_util.h',
+        'retry_util.h',
         'string_util.h',
+        'struct_like_set.h',
+        'task_group.h',
         'temporal_util.h',
         'timepoint.h',
         'transform_util.h',

@@ -25,8 +25,10 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include "iceberg/expression/literal.h"
 #include "iceberg/result.h"
 #include "iceberg/schema_field.h"
+#include "iceberg/table_metadata.h"
 #include "iceberg/test/matchers.h"
 #include "iceberg/util/formatter.h"  // IWYU pragma: keep
 
@@ -94,6 +96,173 @@ TEST(SchemaTest, Equality) {
   ASSERT_NE(schema4, schema1);
   ASSERT_EQ(schema1, schema5);
   ASSERT_EQ(schema5, schema1);
+}
+
+TEST(SchemaTest, ValidateRejectsV3TypesBeforeFormatV3) {
+  iceberg::Schema timestamp_ns_schema(
+      {iceberg::SchemaField(1, "timestamp_ns", iceberg::timestamp_ns(), false)});
+  iceberg::Schema timestamptz_ns_schema(
+      {iceberg::SchemaField(1, "timestamptz_ns", iceberg::timestamptz_ns(), false)});
+  iceberg::Schema unknown_schema(
+      {iceberg::SchemaField(1, "unknown", iceberg::unknown(), true)});
+
+  auto status = timestamp_ns_schema.Validate(2);
+  ASSERT_THAT(status, iceberg::IsError(iceberg::ErrorKind::kInvalidSchema));
+  EXPECT_THAT(status, iceberg::HasErrorMessage(
+                          "Invalid type for timestamp_ns: timestamp_ns is not "
+                          "supported until v3"));
+
+  status = timestamptz_ns_schema.Validate(2);
+  ASSERT_THAT(status, iceberg::IsError(iceberg::ErrorKind::kInvalidSchema));
+  EXPECT_THAT(status, iceberg::HasErrorMessage(
+                          "Invalid type for timestamptz_ns: timestamptz_ns is not "
+                          "supported until v3"));
+
+  status = unknown_schema.Validate(2);
+  ASSERT_THAT(status, iceberg::IsError(iceberg::ErrorKind::kInvalidSchema));
+  EXPECT_THAT(status, iceberg::HasErrorMessage(
+                          "Invalid type for unknown: unknown is not supported until v3"));
+
+  EXPECT_THAT(
+      timestamp_ns_schema.Validate(iceberg::TableMetadata::kSupportedTableFormatVersion),
+      iceberg::IsOk());
+  EXPECT_THAT(timestamptz_ns_schema.Validate(
+                  iceberg::TableMetadata::kSupportedTableFormatVersion),
+              iceberg::IsOk());
+  EXPECT_THAT(
+      unknown_schema.Validate(iceberg::TableMetadata::kSupportedTableFormatVersion),
+      iceberg::IsOk());
+}
+
+TEST(SchemaTest, ValidateRejectsInitialDefaultBeforeFormatV3) {
+  iceberg::Schema schema({iceberg::SchemaField(
+      1, "id", iceberg::int32(), false, /*doc=*/{},
+      std::make_shared<const iceberg::Literal>(iceberg::Literal::Int(42)))});
+
+  auto status = schema.Validate(2);
+  ASSERT_THAT(status, iceberg::IsError(iceberg::ErrorKind::kInvalidSchema));
+  EXPECT_THAT(status, iceberg::HasErrorMessage("is not supported until v3"));
+
+  EXPECT_THAT(schema.Validate(iceberg::TableMetadata::kSupportedTableFormatVersion),
+              iceberg::IsOk());
+}
+
+TEST(SchemaTest, ValidateDoesNotVersionGateWriteDefault) {
+  // A write-default does not reinterpret existing data, so it is not gated on
+  // format version: a write-default alone is accepted below v3.
+  iceberg::Schema schema({iceberg::SchemaField(
+      1, "id", iceberg::int32(), false, /*doc=*/{}, /*initial_default=*/nullptr,
+      std::make_shared<const iceberg::Literal>(iceberg::Literal::Int(7)))});
+
+  EXPECT_THAT(schema.Validate(2), iceberg::IsOk());
+}
+
+TEST(SchemaTest, ValidateRejectsMismatchedDefaultValue) {
+  // Defaults are stored verbatim, so a default whose type differs from the field type is
+  // rejected by Validate.
+  iceberg::Schema schema({iceberg::SchemaField(
+      1, "id", iceberg::int32(), false, /*doc=*/{}, /*initial_default=*/nullptr,
+      std::make_shared<const iceberg::Literal>(iceberg::Literal::String("oops")))});
+
+  auto status = schema.Validate(iceberg::TableMetadata::kSupportedTableFormatVersion);
+  ASSERT_THAT(status, iceberg::IsError(iceberg::ErrorKind::kInvalidSchema));
+  EXPECT_THAT(status, iceberg::HasErrorMessage("write-default"));
+}
+
+TEST(SchemaTest, NullDefaultModeledAsAbsence) {
+  // A present-null default is modeled as the absence of a default (matching Java): it is
+  // dropped at construction, so the field has no stored default and compares equal to a
+  // field with no default, and it validates cleanly.
+  iceberg::SchemaField with_null(
+      1, "id", iceberg::int32(), /*optional=*/true, /*doc=*/{},
+      std::make_shared<const iceberg::Literal>(iceberg::Literal::Null(iceberg::int32())),
+      std::make_shared<const iceberg::Literal>(iceberg::Literal::Null(iceberg::int32())));
+  EXPECT_EQ(with_null.initial_default(), nullptr);
+  EXPECT_EQ(with_null.write_default(), nullptr);
+
+  iceberg::SchemaField no_default(1, "id", iceberg::int32(), /*optional=*/true);
+  EXPECT_EQ(with_null, no_default);
+
+  iceberg::Schema schema({with_null});
+  EXPECT_THAT(schema.Validate(iceberg::TableMetadata::kSupportedTableFormatVersion),
+              iceberg::IsOk());
+}
+
+TEST(SchemaTest, EqualsDistinguishesDefaultValues) {
+  auto field = [](std::shared_ptr<const iceberg::Literal> d) {
+    return iceberg::SchemaField(1, "id", iceberg::int32(), /*optional=*/true, /*doc=*/{},
+                                std::move(d));
+  };
+  // Differ only in default value -> unequal; default vs no-default -> unequal.
+  EXPECT_NE(field(std::make_shared<const iceberg::Literal>(iceberg::Literal::Int(1))),
+            field(std::make_shared<const iceberg::Literal>(iceberg::Literal::Int(2))));
+  EXPECT_NE(field(std::make_shared<const iceberg::Literal>(iceberg::Literal::Int(1))),
+            field(nullptr));
+}
+
+TEST(SchemaTest, ValidateRejectsDefaultOnNonPrimitiveAndMustBeNullTypes) {
+  // A struct (non-primitive) field with a non-null default is rejected.
+  iceberg::Schema struct_default({iceberg::SchemaField(
+      1, "s",
+      MakeStructType(iceberg::SchemaField(2, "x", iceberg::int32(), /*optional=*/true)),
+      /*optional=*/true, /*doc=*/{},
+      std::make_shared<const iceberg::Literal>(iceberg::Literal::Int(1)))});
+  EXPECT_THAT(
+      struct_default.Validate(iceberg::TableMetadata::kSupportedTableFormatVersion),
+      iceberg::IsError(iceberg::ErrorKind::kInvalidSchema));
+
+  // unknown/geometry/geography must default to null: a non-null default is rejected.
+  iceberg::Schema geo_default({iceberg::SchemaField(
+      1, "g", iceberg::geometry(), /*optional=*/true, /*doc=*/{},
+      std::make_shared<const iceberg::Literal>(iceberg::Literal::Int(1)))});
+  auto status =
+      geo_default.Validate(iceberg::TableMetadata::kSupportedTableFormatVersion);
+  ASSERT_THAT(status, iceberg::IsError(iceberg::ErrorKind::kInvalidSchema));
+  EXPECT_THAT(status, iceberg::HasErrorMessage("cannot have a default value"));
+}
+
+TEST(SchemaTest, ReassignIdsPreservesDefaultValues) {
+  // Reassigning field IDs rebuilds each SchemaField, so the rebuild must carry the
+  // default values over to the field with the new ID.
+  std::vector<iceberg::SchemaField> fields;
+  fields.push_back(iceberg::SchemaField(
+      1, "id", iceberg::int32(), false, /*doc=*/{},
+      std::make_shared<const iceberg::Literal>(iceberg::Literal::Int(42)),
+      std::make_shared<const iceberg::Literal>(iceberg::Literal::Int(7))));
+  auto reassign_id = [](int32_t old_id) { return old_id + 1000; };
+
+  iceberg::Schema schema(std::move(fields), iceberg::Schema::kInitialSchemaId,
+                         reassign_id);
+
+  ASSERT_EQ(schema.fields().size(), 1);
+  const iceberg::SchemaField& field = schema.fields()[0];
+  EXPECT_EQ(field.field_id(), 1001);
+  ASSERT_NE(field.initial_default(), nullptr);
+  EXPECT_EQ(*field.initial_default(), iceberg::Literal::Int(42));
+  ASSERT_NE(field.write_default(), nullptr);
+  EXPECT_EQ(*field.write_default(), iceberg::Literal::Int(7));
+}
+
+TEST(SchemaTest, ValidateRejectsInvalidUnknownFields) {
+  iceberg::Schema required_unknown_schema(
+      {iceberg::SchemaField(1, "mystery", iceberg::unknown(), false)});
+  auto status = required_unknown_schema.Validate(
+      iceberg::TableMetadata::kSupportedTableFormatVersion);
+  ASSERT_THAT(status, iceberg::IsError(iceberg::ErrorKind::kInvalidArgument));
+  EXPECT_THAT(status,
+              iceberg::HasErrorMessage("Unknown type field 'mystery' must be optional"));
+
+  iceberg::Schema map_key_unknown_schema({iceberg::SchemaField::MakeOptional(
+      1, "properties",
+      std::make_shared<iceberg::MapType>(
+          iceberg::SchemaField::MakeRequired(2, iceberg::MapType::kKeyName,
+                                             iceberg::unknown()),
+          iceberg::SchemaField::MakeOptional(3, iceberg::MapType::kValueName,
+                                             iceberg::string())))});
+  status = map_key_unknown_schema.Validate(
+      iceberg::TableMetadata::kSupportedTableFormatVersion);
+  ASSERT_THAT(status, iceberg::IsError(iceberg::ErrorKind::kInvalidArgument));
+  EXPECT_THAT(status, iceberg::HasErrorMessage("Map 'key' cannot be unknown type"));
 }
 
 TEST(SchemaTest, IdentifierFields) {
@@ -612,6 +781,7 @@ iceberg::SchemaField Id() { return {1, "id", iceberg::int32(), true}; }
 iceberg::SchemaField Name() { return {2, "name", iceberg::string(), false}; }
 iceberg::SchemaField Age() { return {3, "age", iceberg::int32(), true}; }
 iceberg::SchemaField Email() { return {4, "email", iceberg::string(), true}; }
+iceberg::SchemaField Payload() { return {5, "payload", iceberg::variant(), true}; }
 iceberg::SchemaField Street() { return {11, "street", iceberg::string(), true}; }
 iceberg::SchemaField City() { return {12, "city", iceberg::string(), true}; }
 iceberg::SchemaField Zip() { return {13, "zip", iceberg::int32(), true}; }
@@ -622,6 +792,10 @@ iceberg::SchemaField Element() { return {41, "element", iceberg::string(), false
 
 static std::unique_ptr<iceberg::Schema> BasicSchema() {
   return MakeSchema(Id(), Name(), Age(), Email());
+}
+
+static std::unique_ptr<iceberg::Schema> VariantSchema() {
+  return MakeSchema(Id(), Payload());
 }
 
 static std::unique_ptr<iceberg::Schema> AddressSchema() {
@@ -873,30 +1047,36 @@ TEST_P(ProjectParamTest, ProjectFields) {
 
 INSTANTIATE_TEST_SUITE_P(
     ProjectTestCases, ProjectParamTest,
-    ::testing::Values(ProjectTestParam{.test_name = "ProjectAllFields",
-                                       .create_schema = []() { return BasicSchema(); },
-                                       .selected_ids = {1, 2, 3, 4},
-                                       .expected_schema = []() { return BasicSchema(); },
-                                       .should_succeed = true},
+    ::testing::Values(
+        ProjectTestParam{.test_name = "ProjectAllFields",
+                         .create_schema = []() { return BasicSchema(); },
+                         .selected_ids = {1, 2, 3, 4},
+                         .expected_schema = []() { return BasicSchema(); },
+                         .should_succeed = true},
 
-                      ProjectTestParam{
-                          .test_name = "ProjectSingleField",
-                          .create_schema = []() { return BasicSchema(); },
-                          .selected_ids = {2},
-                          .expected_schema = []() { return MakeSchema(Name()); },
-                          .should_succeed = true},
+        ProjectTestParam{.test_name = "ProjectSingleField",
+                         .create_schema = []() { return BasicSchema(); },
+                         .selected_ids = {2},
+                         .expected_schema = []() { return MakeSchema(Name()); },
+                         .should_succeed = true},
 
-                      ProjectTestParam{.test_name = "ProjectNonExistentFieldId",
-                                       .create_schema = []() { return BasicSchema(); },
-                                       .selected_ids = {999},
-                                       .expected_schema = []() { return MakeSchema(); },
-                                       .should_succeed = true},
+        ProjectTestParam{.test_name = "ProjectVariantField",
+                         .create_schema = []() { return VariantSchema(); },
+                         .selected_ids = {5},
+                         .expected_schema = []() { return MakeSchema(Payload()); },
+                         .should_succeed = true},
 
-                      ProjectTestParam{.test_name = "ProjectEmptySelection",
-                                       .create_schema = []() { return BasicSchema(); },
-                                       .selected_ids = {},
-                                       .expected_schema = []() { return MakeSchema(); },
-                                       .should_succeed = true}));
+        ProjectTestParam{.test_name = "ProjectNonExistentFieldId",
+                         .create_schema = []() { return BasicSchema(); },
+                         .selected_ids = {999},
+                         .expected_schema = []() { return MakeSchema(); },
+                         .should_succeed = true},
+
+        ProjectTestParam{.test_name = "ProjectEmptySelection",
+                         .create_schema = []() { return BasicSchema(); },
+                         .selected_ids = {},
+                         .expected_schema = []() { return MakeSchema(); },
+                         .should_succeed = true}));
 
 INSTANTIATE_TEST_SUITE_P(ProjectNestedTestCases, ProjectParamTest,
                          ::testing::Values(ProjectTestParam{

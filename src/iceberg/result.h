@@ -19,9 +19,11 @@
 
 #pragma once
 
+#include <concepts>
 #include <expected>
 #include <format>
 #include <string>
+#include <type_traits>
 
 #include "iceberg/iceberg_export.h"
 
@@ -48,7 +50,10 @@ enum class ErrorKind {
   kJsonParseError,
   kNamespaceNotEmpty,
   kNoSuchNamespace,
+  kNoSuchPlanId,
+  kNoSuchPlanTask,
   kNoSuchTable,
+  kNoSuchWarehouse,
   kNoSuchView,
   kNotAllowed,
   kNotAuthorized,
@@ -56,6 +61,7 @@ enum class ErrorKind {
   kNotImplemented,
   kNotSupported,
   kRestError,
+  kRetryableValidationFailed,
   kServiceUnavailable,
   kTokenExpired,
   kUnknownError,
@@ -111,7 +117,10 @@ DEFINE_ERROR_FUNCTION(IOError)
 DEFINE_ERROR_FUNCTION(JsonParseError)
 DEFINE_ERROR_FUNCTION(NamespaceNotEmpty)
 DEFINE_ERROR_FUNCTION(NoSuchNamespace)
+DEFINE_ERROR_FUNCTION(NoSuchPlanId)
+DEFINE_ERROR_FUNCTION(NoSuchPlanTask)
 DEFINE_ERROR_FUNCTION(NoSuchTable)
+DEFINE_ERROR_FUNCTION(NoSuchWarehouse)
 DEFINE_ERROR_FUNCTION(NoSuchView)
 DEFINE_ERROR_FUNCTION(NotAllowed)
 DEFINE_ERROR_FUNCTION(NotAuthorized)
@@ -119,11 +128,19 @@ DEFINE_ERROR_FUNCTION(NotFound)
 DEFINE_ERROR_FUNCTION(NotImplemented)
 DEFINE_ERROR_FUNCTION(NotSupported)
 DEFINE_ERROR_FUNCTION(RestError)
+DEFINE_ERROR_FUNCTION(RetryableValidationFailed)
 DEFINE_ERROR_FUNCTION(ServiceUnavailable)
 DEFINE_ERROR_FUNCTION(TokenExpired)
 DEFINE_ERROR_FUNCTION(UnknownError)
 DEFINE_ERROR_FUNCTION(ValidationFailed)
 
 #undef DEFINE_ERROR_FUNCTION
+
+template <typename T>
+concept AsResult = std::derived_from<std::remove_cvref_t<T>,
+                                     Result<typename std::remove_cvref_t<T>::value_type>>;
+
+template <AsResult T>
+using ResultValueT = typename std::remove_cvref_t<T>::value_type;
 
 }  // namespace iceberg

@@ -19,8 +19,16 @@
 
 #include "iceberg/manifest/manifest_group.h"
 
+#include <algorithm>
+#include <memory>
+#include <mutex>
+#include <shared_mutex>
+#include <string>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
+#include "iceberg/expression/binder.h"
 #include "iceberg/expression/evaluator.h"
 #include "iceberg/expression/expression.h"
 #include "iceberg/expression/manifest_evaluator.h"
@@ -29,13 +37,47 @@
 #include "iceberg/file_io.h"
 #include "iceberg/manifest/manifest_reader.h"
 #include "iceberg/partition_spec.h"
+#include "iceberg/row/manifest_wrapper.h"
 #include "iceberg/schema.h"
 #include "iceberg/table_scan.h"
+#include "iceberg/type.h"
 #include "iceberg/util/checked_cast.h"
 #include "iceberg/util/content_file_util.h"
+#include "iceberg/util/executor_util_internal.h"
 #include "iceberg/util/macros.h"
 
 namespace iceberg {
+
+namespace {
+
+std::shared_ptr<Schema> DataFileFilterSchema() {
+  auto empty_partition_type = std::make_shared<StructType>(std::vector<SchemaField>{});
+  return std::make_shared<Schema>(std::vector<SchemaField>{
+      DataFile::kContent,
+      DataFile::kFilePath,
+      DataFile::kFileFormat,
+      DataFile::kSpecId,
+      SchemaField::MakeRequired(DataFile::kPartitionFieldId, DataFile::kPartitionField,
+                                std::move(empty_partition_type), DataFile::kPartitionDoc),
+      DataFile::kRecordCount,
+      DataFile::kFileSize,
+      DataFile::kColumnSizes,
+      DataFile::kValueCounts,
+      DataFile::kNullValueCounts,
+      DataFile::kNanValueCounts,
+      DataFile::kLowerBounds,
+      DataFile::kUpperBounds,
+      DataFile::kKeyMetadata,
+      DataFile::kSplitOffsets,
+      DataFile::kEqualityIds,
+      DataFile::kSortOrderId,
+      DataFile::kFirstRowId,
+      DataFile::kReferencedDataFile,
+      DataFile::kContentOffset,
+      DataFile::kContentSize});
+}
+
+}  // namespace
 
 Result<std::unique_ptr<ManifestGroup>> ManifestGroup::Make(
     std::shared_ptr<FileIO> io, std::shared_ptr<Schema> schema,
@@ -147,6 +189,12 @@ ManifestGroup& ManifestGroup::CaseSensitive(bool case_sensitive) {
 
 ManifestGroup& ManifestGroup::ColumnsToKeepStats(std::unordered_set<int32_t> column_ids) {
   columns_to_keep_stats_ = std::move(column_ids);
+  return *this;
+}
+
+ManifestGroup& ManifestGroup::PlanWith(OptionalExecutor executor) {
+  executor_ = executor;
+  delete_index_builder_.PlanWith(executor);
   return *this;
 }
 
@@ -262,29 +310,64 @@ Result<std::vector<ManifestEntry>> ManifestGroup::Entries() {
 
 Result<std::unique_ptr<ManifestReader>> ManifestGroup::MakeReader(
     const ManifestFile& manifest) {
-  auto spec_it = specs_by_id_.find(manifest.partition_spec_id);
-  if (spec_it == specs_by_id_.end()) {
-    return InvalidArgument("Partition spec {} not found for manifest {}",
-                           manifest.partition_spec_id, manifest.manifest_path);
-  }
-
   ICEBERG_ASSIGN_OR_RAISE(auto reader,
-                          ManifestReader::Make(manifest, io_, schema_, spec_it->second));
+                          ManifestReader::Make(manifest, io_, schema_, specs_by_id_));
+
+  auto columns = columns_;
+  if (file_filter_ && file_filter_->op() != Expression::Operation::kTrue &&
+      !columns.empty() && !std::ranges::contains(columns, Schema::kAllColumns)) {
+    auto data_file_schema = DataFileFilterSchema();
+    ICEBERG_ASSIGN_OR_RAISE(
+        auto bound_file_filter,
+        Binder::Bind(*data_file_schema, file_filter_, case_sensitive_));
+    ICEBERG_ASSIGN_OR_RAISE(auto referenced_field_ids,
+                            ReferenceVisitor::GetReferencedFieldIds(bound_file_filter));
+
+    std::unordered_set<std::string> selected_columns(columns.cbegin(), columns.cend());
+    for (const auto field_id : referenced_field_ids) {
+      if (field_id == DataFile::kSpecIdFieldId) {
+        continue;
+      }
+      ICEBERG_ASSIGN_OR_RAISE(auto column_name,
+                              data_file_schema->FindColumnNameById(field_id));
+      if (column_name.has_value()) {
+        std::string column_name_str(column_name.value());
+        if (selected_columns.contains(column_name_str)) {
+          continue;
+        }
+        columns.push_back(std::move(column_name_str));
+        selected_columns.insert(columns.back());
+      }
+    }
+  }
 
   reader->FilterRows(data_filter_)
       .FilterPartitions(partition_filter_)
       .CaseSensitive(case_sensitive_)
-      .Select(columns_);
+      .Select(std::move(columns));
 
   return reader;
 }
 
 Result<std::unordered_map<int32_t, std::vector<ManifestEntry>>>
 ManifestGroup::ReadEntries() {
+  // TODO(zehua): Replace with a thread-safe LRU cache.
+  std::shared_mutex eval_cache_mutex;
   std::unordered_map<int32_t, std::unique_ptr<ManifestEvaluator>> eval_cache;
+
   auto get_manifest_evaluator = [&](int32_t spec_id) -> Result<ManifestEvaluator*> {
-    if (eval_cache.contains(spec_id)) {
-      return eval_cache[spec_id].get();
+    {
+      std::shared_lock lock(eval_cache_mutex);
+      auto iter = eval_cache.find(spec_id);
+      if (iter != eval_cache.end()) {
+        return iter->second.get();
+      }
+    }
+
+    std::lock_guard lock(eval_cache_mutex);
+    auto iter = eval_cache.find(spec_id);
+    if (iter != eval_cache.end()) {
+      return iter->second.get();
     }
 
     auto spec_iter = specs_by_id_.find(spec_id);
@@ -305,63 +388,72 @@ ManifestGroup::ReadEntries() {
     return eval_cache[spec_id].get();
   };
 
+  const bool has_file_filter =
+      file_filter_ && file_filter_->op() != Expression::Operation::kTrue;
   std::unique_ptr<Evaluator> data_file_evaluator;
-  if (file_filter_ && file_filter_->op() != Expression::Operation::kTrue) {
-    // TODO(gangwu): create an Evaluator on the DataFile schema with empty
-    // partition type
+  if (has_file_filter) {
+    ICEBERG_ASSIGN_OR_RAISE(
+        data_file_evaluator,
+        Evaluator::Make(*DataFileFilterSchema(), file_filter_, case_sensitive_));
   }
 
-  std::unordered_map<int32_t, std::vector<ManifestEntry>> result;
+  return ParallelCollect(
+      executor_, data_manifests_,
+      [&](const ManifestFile& manifest)
+          -> Result<std::unordered_map<int32_t, std::vector<ManifestEntry>>> {
+        const int32_t spec_id = manifest.partition_spec_id;
 
-  // TODO(gangwu): Parallelize reading manifests
-  for (const auto& manifest : data_manifests_) {
-    const int32_t spec_id = manifest.partition_spec_id;
+        ICEBERG_ASSIGN_OR_RAISE(auto manifest_evaluator, get_manifest_evaluator(spec_id));
+        ICEBERG_ASSIGN_OR_RAISE(bool should_match,
+                                manifest_evaluator->Evaluate(manifest));
+        if (!should_match) {
+          // Skip this manifest because it doesn't match partition filter
+          return {};
+        }
 
-    ICEBERG_ASSIGN_OR_RAISE(auto manifest_evaluator, get_manifest_evaluator(spec_id));
-    ICEBERG_ASSIGN_OR_RAISE(bool should_match, manifest_evaluator->Evaluate(manifest));
-    if (!should_match) {
-      // Skip this manifest because it doesn't match partition filter
-      continue;
-    }
+        if (ignore_deleted_) {
+          // only scan manifests that have entries other than deletes
+          if (!manifest.has_added_files() && !manifest.has_existing_files()) {
+            return {};
+          }
+        }
 
-    if (ignore_deleted_) {
-      // only scan manifests that have entries other than deletes
-      if (!manifest.has_added_files() && !manifest.has_existing_files()) {
-        continue;
-      }
-    }
+        if (ignore_existing_) {
+          // only scan manifests that have entries other than existing
+          if (!manifest.has_added_files() && !manifest.has_deleted_files()) {
+            return {};
+          }
+        }
 
-    if (ignore_existing_) {
-      // only scan manifests that have entries other than existing
-      if (!manifest.has_added_files() && !manifest.has_deleted_files()) {
-        continue;
-      }
-    }
+        // Read manifest entries
+        ICEBERG_ASSIGN_OR_RAISE(auto reader, MakeReader(manifest));
+        ICEBERG_ASSIGN_OR_RAISE(
+            auto entries, ignore_deleted_ ? reader->LiveEntries() : reader->Entries());
 
-    // Read manifest entries
-    ICEBERG_ASSIGN_OR_RAISE(auto reader, MakeReader(manifest));
-    ICEBERG_ASSIGN_OR_RAISE(auto entries,
-                            ignore_deleted_ ? reader->LiveEntries() : reader->Entries());
+        std::unordered_map<int32_t, std::vector<ManifestEntry>> manifest_result;
 
-    for (auto& entry : entries) {
-      if (ignore_existing_ && entry.status == ManifestStatus::kExisting) {
-        continue;
-      }
+        for (auto& entry : entries) {
+          if (ignore_existing_ && entry.status == ManifestStatus::kExisting) {
+            continue;
+          }
 
-      if (data_file_evaluator != nullptr) {
-        // TODO(gangwu): implement data_file_evaluator to evaluate StructLike on
-        // top of entry.data_file
-      }
+          if (data_file_evaluator != nullptr) {
+            DataFileStructLike data_file(*entry.data_file);
+            ICEBERG_ASSIGN_OR_RAISE(bool should_match,
+                                    data_file_evaluator->Evaluate(data_file));
+            if (!should_match) {
+              continue;
+            }
+          }
 
-      if (!manifest_entry_predicate_(entry)) {
-        continue;
-      }
+          if (!manifest_entry_predicate_(entry)) {
+            continue;
+          }
 
-      result[spec_id].push_back(std::move(entry));
-    }
-  }
-
-  return result;
+          manifest_result[spec_id].push_back(std::move(entry));
+        }
+        return manifest_result;
+      });
 }
 
 }  // namespace iceberg

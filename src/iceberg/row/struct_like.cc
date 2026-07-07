@@ -45,6 +45,8 @@ Result<Scalar> LiteralToScalar(const Literal& literal) {
     case TypeId::kTime:
     case TypeId::kTimestamp:
     case TypeId::kTimestampTz:
+    case TypeId::kTimestampNs:
+    case TypeId::kTimestampTzNs:
       return Scalar{std::get<int64_t>(literal.value())};
     case TypeId::kFloat:
       return Scalar{std::get<float>(literal.value())};
@@ -57,6 +59,12 @@ Result<Scalar> LiteralToScalar(const Literal& literal) {
     case TypeId::kBinary:
     case TypeId::kFixed: {
       const auto& bytes = std::get<std::vector<uint8_t>>(literal.value());
+      return Scalar{
+          std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size())};
+    }
+    case TypeId::kUuid: {
+      const auto& uuid = std::get<Uuid>(literal.value());
+      const auto& bytes = uuid.bytes();
       return Scalar{
           std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size())};
     }
@@ -152,12 +160,22 @@ Result<Literal> StructLikeAccessor::GetLiteral(const StructLike& struct_like) co
       return Literal::Timestamp(std::get<int64_t>(scalar));
     case TypeId::kTimestampTz:
       return Literal::TimestampTz(std::get<int64_t>(scalar));
+    case TypeId::kTimestampNs:
+      return Literal::TimestampNs(std::get<int64_t>(scalar));
+    case TypeId::kTimestampTzNs:
+      return Literal::TimestampTzNs(std::get<int64_t>(scalar));
     case TypeId::kFixed: {
       const auto& fixed_data = std::get<std::string_view>(scalar);
       return Literal::Fixed(std::vector<uint8_t>(fixed_data.cbegin(), fixed_data.cend()));
     }
-    case TypeId::kUuid:
-      // TODO(gangwu): Implement UUID type
+    case TypeId::kUuid: {
+      const auto& uuid_data = std::get<std::string_view>(scalar);
+      ICEBERG_ASSIGN_OR_RAISE(
+          auto uuid,
+          Uuid::FromBytes(std::span<const uint8_t>(
+              reinterpret_cast<const uint8_t*>(uuid_data.data()), uuid_data.size())));
+      return Literal::UUID(uuid);
+    }
     default:
       return NotSupported("Cannot convert scalar to literal of type {}",
                           type_->ToString());

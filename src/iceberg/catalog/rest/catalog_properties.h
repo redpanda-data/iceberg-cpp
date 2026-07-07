@@ -47,6 +47,8 @@ class ICEBERG_REST_EXPORT RestCatalogProperties
   inline static Entry<std::string> kName{"name", ""};
   /// \brief The warehouse path.
   inline static Entry<std::string> kWarehouse{"warehouse", ""};
+  /// \brief The FileIO implementation name.
+  inline static Entry<std::string> kIOImpl{"io-impl", ""};
   /// \brief The optional prefix for REST API paths.
   inline static Entry<std::string> kPrefix{"prefix", ""};
   /// \brief The encoded separator used to join namespace levels in REST paths.

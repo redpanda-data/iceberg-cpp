@@ -26,13 +26,14 @@
 #include <arrow/record_batch.h>
 #include <arrow/result.h>
 #include <arrow/type.h>
+#include <arrow/util/config.h>
 #include <arrow/util/key_value_metadata.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/schema.h>
 #include <parquet/file_reader.h>
 #include <parquet/properties.h>
 
-#include "iceberg/arrow/arrow_fs_file_io_internal.h"
+#include "iceberg/arrow/arrow_io_internal.h"
 #include "iceberg/arrow/arrow_status_internal.h"
 #include "iceberg/arrow/metadata_column_util_internal.h"
 #include "iceberg/parquet/parquet_data_util_internal.h"
@@ -41,7 +42,6 @@
 #include "iceberg/result.h"
 #include "iceberg/schema_internal.h"
 #include "iceberg/schema_util.h"
-#include "iceberg/util/checked_cast.h"
 #include "iceberg/util/macros.h"
 
 namespace iceberg::parquet {
@@ -50,14 +50,7 @@ namespace {
 
 Result<std::shared_ptr<::arrow::io::RandomAccessFile>> OpenInputStream(
     const ReaderOptions& options) {
-  ::arrow::fs::FileInfo file_info(options.path, ::arrow::fs::FileType::File);
-  if (options.length) {
-    file_info.set_size(options.length.value());
-  }
-
-  auto io = internal::checked_pointer_cast<arrow::ArrowFileSystemFileIO>(options.io);
-  ICEBERG_ARROW_ASSIGN_OR_RETURN(auto input, io->fs()->OpenInputFile(file_info));
-  return input;
+  return arrow::OpenArrowInputStream(options.io, options.path, options.length);
 }
 
 Result<SchemaProjection> BuildProjection(::parquet::arrow::FileReader* reader,
@@ -131,8 +124,16 @@ class ParquetReader::Impl {
     ICEBERG_ASSIGN_OR_RAISE(input_stream_, OpenInputStream(options));
     auto file_reader =
         ::parquet::ParquetFileReader::Open(input_stream_, reader_properties);
+    // Arrow >= 23 provides (and prefers) the arrow::Result-returning overload and
+    // deprecates the out-parameter form; Arrow 22 only has the out-parameter form.
+#if ARROW_VERSION_MAJOR >= 23
+    ICEBERG_ARROW_ASSIGN_OR_RETURN(
+        reader_, ::parquet::arrow::FileReader::Make(pool_, std::move(file_reader),
+                                                    arrow_reader_properties));
+#else
     ICEBERG_ARROW_RETURN_NOT_OK(::parquet::arrow::FileReader::Make(
         pool_, std::move(file_reader), arrow_reader_properties, &reader_));
+#endif
 
     // Project read schema onto the Parquet file schema
     ICEBERG_ASSIGN_OR_RAISE(projection_, BuildProjection(reader_.get(), *read_schema_));

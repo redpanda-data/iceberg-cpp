@@ -523,10 +523,10 @@ Status DecodePrimitiveValueToBuilder(const ::avro::NodePtr& avro_node,
     }
 
     case TypeId::kDate: {
-      if (avro_node->type() != ::avro::AVRO_INT ||
-          avro_node->logicalType().type() != ::avro::LogicalType::DATE) {
+      if (!IsAvroDateOrPlainInt(avro_node)) {
         return InvalidArgument(
-            "Expected Avro int with DATE logical type for date field, got: {}",
+            "Expected Avro int with DATE logical type or plain int for date field, got: "
+            "{}",
             ToString(avro_node));
       }
       auto* builder = internal::checked_cast<::arrow::Date32Builder*>(array_builder);
@@ -562,6 +562,20 @@ Status DecodePrimitiveValueToBuilder(const ::avro::NodePtr& avro_node,
       return {};
     }
 
+    case TypeId::kTimestampNs:
+    case TypeId::kTimestampTzNs: {
+      if (avro_node->type() != ::avro::AVRO_LONG ||
+          avro_node->logicalType().type() != ::avro::LogicalType::TIMESTAMP_NANOS) {
+        return InvalidArgument(
+            "Expected Avro long with TIMESTAMP_NANOS for timestamp field, got: {}",
+            ToString(avro_node));
+      }
+      auto* builder = internal::checked_cast<::arrow::TimestampBuilder*>(array_builder);
+      int64_t value = decoder.decodeLong();
+      ICEBERG_ARROW_RETURN_NOT_OK(builder->Append(value));
+      return {};
+    }
+
     default:
       return InvalidArgument("Unsupported primitive type {} to decode from avro node {}",
                              projected_field.type()->ToString(), ToString(avro_node));
@@ -574,6 +588,12 @@ Status DecodeFieldToBuilder(const ::avro::NodePtr& avro_node, ::avro::Decoder& d
                             const SchemaField& projected_field,
                             const arrow::MetadataColumnContext& metadata_context,
                             ::arrow::ArrayBuilder* array_builder, DecodeContext& ctx) {
+  if (projection.kind == FieldProjection::Kind::kNull) {
+    ICEBERG_RETURN_UNEXPECTED(SkipAvroValue(avro_node, decoder));
+    ICEBERG_ARROW_RETURN_NOT_OK(array_builder->AppendNull());
+    return {};
+  }
+
   if (avro_node->type() == ::avro::AVRO_UNION) {
     const size_t branch_index = decoder.decodeUnionIndex();
 

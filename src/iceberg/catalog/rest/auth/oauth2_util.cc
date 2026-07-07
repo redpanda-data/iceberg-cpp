@@ -19,15 +19,15 @@
 
 #include "iceberg/catalog/rest/auth/oauth2_util.h"
 
-#include <utility>
-
 #include <nlohmann/json.hpp>
 
+#include "iceberg/catalog/rest/auth/auth_properties.h"
 #include "iceberg/catalog/rest/auth/auth_session.h"
 #include "iceberg/catalog/rest/error_handlers.h"
 #include "iceberg/catalog/rest/http_client.h"
 #include "iceberg/catalog/rest/json_serde_internal.h"
 #include "iceberg/json_serde_internal.h"
+#include "iceberg/util/base64.h"
 #include "iceberg/util/macros.h"
 
 namespace iceberg::rest::auth {
@@ -66,7 +66,7 @@ Result<OAuthTokenResponse> FetchToken(HttpClient& client, AuthSession& session,
   ICEBERG_ASSIGN_OR_RAISE(
       auto response,
       client.PostForm(properties.oauth2_server_uri(), form_data,
-                      /*headers=*/{}, *DefaultErrorHandler::Instance(), session));
+                      /*headers=*/{}, *OAuthErrorHandler::Instance(), session));
 
   ICEBERG_ASSIGN_OR_RAISE(auto json, FromJsonString(response.body()));
   ICEBERG_ASSIGN_OR_RAISE(auto token_response, FromJson<OAuthTokenResponse>(json));
@@ -74,54 +74,49 @@ Result<OAuthTokenResponse> FetchToken(HttpClient& client, AuthSession& session,
   return token_response;
 }
 
-Result<OAuthTokenResponse> FetchToken(HttpClient& client, AuthSession& session,
-                                      const std::string& token_endpoint,
-                                      const std::string& client_id,
-                                      const std::string& client_secret,
-                                      const std::string& scope) {
-  std::unordered_map<std::string, std::string> form_data{
-      {std::string(kGrantType), std::string(kClientCredentials)},
-      {std::string(kClientSecret), client_secret},
-  };
-  if (!client_id.empty()) {
-    form_data.emplace(std::string(kClientId), client_id);
-  }
-  if (!scope.empty()) {
-    form_data.emplace(std::string(kScope), scope);
+std::optional<int64_t> ExpiresAtMillis(std::string_view token) {
+  if (token.empty()) {
+    return std::nullopt;
   }
 
-  ICEBERG_ASSIGN_OR_RAISE(auto response,
-                          client.PostForm(token_endpoint, form_data, /*headers=*/{},
-                                          *DefaultErrorHandler::Instance(), session));
-
-  ICEBERG_ASSIGN_OR_RAISE(auto json, FromJsonString(response.body()));
-  ICEBERG_ASSIGN_OR_RAISE(auto token_response, FromJson<OAuthTokenResponse>(json));
-  ICEBERG_RETURN_UNEXPECTED(token_response.Validate());
-  return token_response;
-}
-
-Result<OAuthTokenResponse> RefreshToken(HttpClient& client, AuthSession& session,
-                                        const std::string& token_endpoint,
-                                        const std::string& client_id,
-                                        const std::string& refresh_token,
-                                        const std::string& scope) {
-  std::unordered_map<std::string, std::string> form_data{
-      {std::string(kGrantType), "refresh_token"},
-      {"refresh_token", refresh_token},
-      {std::string(kClientId), client_id},
-  };
-  if (!scope.empty()) {
-    form_data.emplace(std::string(kScope), scope);
+  // A JWT has exactly 3 dot-separated parts: header.payload.signature
+  auto first_dot = token.find('.');
+  if (first_dot == std::string_view::npos) {
+    return std::nullopt;
+  }
+  auto second_dot = token.find('.', first_dot + 1);
+  if (second_dot == std::string_view::npos) {
+    return std::nullopt;
+  }
+  // Ensure there are exactly 3 parts (no additional dots after the signature).
+  // Note: JWE tokens have 5 segments — they are intentionally not supported here
+  // and will return nullopt (graceful degradation to not scheduling refresh).
+  if (token.find('.', second_dot + 1) != std::string_view::npos) {
+    return std::nullopt;
   }
 
-  ICEBERG_ASSIGN_OR_RAISE(auto response,
-                          client.PostForm(token_endpoint, form_data, /*headers=*/{},
-                                          *DefaultErrorHandler::Instance(), session));
+  // Extract and decode the payload (second part).
+  // Note: Base64::UrlDecode returns an error on invalid input, and Ok("") on empty input.
+  // A valid JWT payload is never empty (at minimum "{}"), so empty result reliably
+  // indicates the token is not a JWT we can parse.
+  std::string_view payload_b64 = token.substr(first_dot + 1, second_dot - first_dot - 1);
+  auto payload_result = Base64::UrlDecode(payload_b64);
+  if (!payload_result.has_value() || payload_result->empty()) {
+    return std::nullopt;
+  }
+  const std::string& payload = *payload_result;
 
-  ICEBERG_ASSIGN_OR_RAISE(auto json, FromJsonString(response.body()));
-  ICEBERG_ASSIGN_OR_RAISE(auto token_response, FromJson<OAuthTokenResponse>(json));
-  ICEBERG_RETURN_UNEXPECTED(token_response.Validate());
-  return token_response;
+  // Parse JSON and extract "exp" claim
+  auto json = nlohmann::json::parse(payload, nullptr, /*allow_exceptions=*/false);
+  if (json.is_discarded() || !json.is_object()) {
+    return std::nullopt;
+  }
+  auto it = json.find("exp");
+  if (it == json.end() || !it->is_number()) {
+    return std::nullopt;
+  }
+  auto exp_seconds = static_cast<int64_t>(it->get<double>());
+  return exp_seconds * 1000;  // Convert seconds to milliseconds
 }
 
 }  // namespace iceberg::rest::auth

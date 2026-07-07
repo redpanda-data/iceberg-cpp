@@ -40,7 +40,9 @@ std::shared_ptr<Type> IdentityTransform::ResultType() const { return source_type
 
 Result<std::unique_ptr<TransformFunction>> IdentityTransform::Make(
     std::shared_ptr<Type> const& source_type) {
-  if (!source_type || !source_type->is_primitive()) {
+  if (!source_type || source_type->is_variant() ||
+      source_type->type_id() == TypeId::kGeometry ||
+      source_type->type_id() == TypeId::kGeography || !source_type->is_primitive()) {
     return NotSupported("{} is not a valid input type for identity transform",
                         source_type ? source_type->ToString() : "null");
   }
@@ -79,6 +81,8 @@ Result<std::unique_ptr<TransformFunction>> BucketTransform::Make(
     case TypeId::kTime:
     case TypeId::kTimestamp:
     case TypeId::kTimestampTz:
+    case TypeId::kTimestampNs:
+    case TypeId::kTimestampTzNs:
     case TypeId::kString:
     case TypeId::kUuid:
     case TypeId::kFixed:
@@ -129,7 +133,7 @@ Result<std::unique_ptr<TransformFunction>> TruncateTransform::Make(
 }
 
 YearTransform::YearTransform(std::shared_ptr<Type> const& source_type)
-    : TransformFunction(TransformType::kTruncate, source_type) {}
+    : TransformFunction(TransformType::kYear, source_type) {}
 
 Result<Literal> YearTransform::Transform(const Literal& literal) {
   ICEBERG_DCHECK(*literal.type() == *source_type(),
@@ -148,6 +152,8 @@ Result<std::unique_ptr<TransformFunction>> YearTransform::Make(
     case TypeId::kDate:
     case TypeId::kTimestamp:
     case TypeId::kTimestampTz:
+    case TypeId::kTimestampNs:
+    case TypeId::kTimestampTzNs:
       break;
     default:
       return NotSupported("{} is not a valid input type for year transform",
@@ -176,6 +182,8 @@ Result<std::unique_ptr<TransformFunction>> MonthTransform::Make(
     case TypeId::kDate:
     case TypeId::kTimestamp:
     case TypeId::kTimestampTz:
+    case TypeId::kTimestampNs:
+    case TypeId::kTimestampTzNs:
       break;
     default:
       return NotSupported("{} is not a valid input type for month transform",
@@ -204,6 +212,8 @@ Result<std::unique_ptr<TransformFunction>> DayTransform::Make(
     case TypeId::kDate:
     case TypeId::kTimestamp:
     case TypeId::kTimestampTz:
+    case TypeId::kTimestampNs:
+    case TypeId::kTimestampTzNs:
       break;
     default:
       return NotSupported("{} is not a valid input type for day transform",
@@ -231,6 +241,8 @@ Result<std::unique_ptr<TransformFunction>> HourTransform::Make(
   switch (source_type->type_id()) {
     case TypeId::kTimestamp:
     case TypeId::kTimestampTz:
+    case TypeId::kTimestampNs:
+    case TypeId::kTimestampTzNs:
       break;
     default:
       return NotSupported("{} is not a valid input type for hour transform",

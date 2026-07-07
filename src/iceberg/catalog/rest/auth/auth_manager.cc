@@ -25,8 +25,8 @@
 #include "iceberg/catalog/rest/auth/auth_properties.h"
 #include "iceberg/catalog/rest/auth/auth_session.h"
 #include "iceberg/catalog/rest/auth/oauth2_util.h"
+#include "iceberg/util/base64.h"
 #include "iceberg/util/macros.h"
-#include "iceberg/util/transform_util.h"
 
 namespace iceberg::rest::auth {
 
@@ -38,8 +38,7 @@ Result<std::shared_ptr<AuthSession>> AuthManager::InitSession(
 }
 
 Result<std::shared_ptr<AuthSession>> AuthManager::ContextualSession(
-    [[maybe_unused]] const std::unordered_map<std::string, std::string>& context,
-    std::shared_ptr<AuthSession> parent) {
+    [[maybe_unused]] const SessionContext& context, std::shared_ptr<AuthSession> parent) {
   // By default, return the parent session as-is
   return parent;
 }
@@ -83,8 +82,7 @@ class BasicAuthManager : public AuthManager {
                      "Missing required property '{}'", AuthProperties::kBasicPassword);
     std::string credential = username_it->second + ":" + password_it->second;
     return AuthSession::MakeDefault(
-        {{std::string(kAuthorizationHeader),
-          "Basic " + TransformUtil::Base64Encode(credential)}});
+        {{std::string(kAuthorizationHeader), "Basic " + Base64::Encode(credential)}});
   }
 };
 
@@ -130,7 +128,8 @@ class OAuth2Manager : public AuthManager {
       init_token_response_.reset();
       return AuthSession::MakeOAuth2(
           token_response, config.oauth2_server_uri(), config.client_id(),
-          config.client_secret(), config.scope(), client, config.expiry_margin_seconds());
+          config.client_secret(), config.scope(), config.keep_refreshed(),
+          config.optional_oauth_params(), client, config.expiry_margin_seconds());
     }
 
     // If token is provided, use it directly.
@@ -145,7 +144,8 @@ class OAuth2Manager : public AuthManager {
       ICEBERG_ASSIGN_OR_RAISE(token_response, FetchToken(client, *base_session, config));
       return AuthSession::MakeOAuth2(
           token_response, config.oauth2_server_uri(), config.client_id(),
-          config.client_secret(), config.scope(), client, config.expiry_margin_seconds());
+          config.client_secret(), config.scope(), config.keep_refreshed(),
+          config.optional_oauth_params(), client, config.expiry_margin_seconds());
     }
 
     return AuthSession::MakeDefault({});

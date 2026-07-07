@@ -48,7 +48,10 @@ iceberg_tests = {
     'table_test': {
         'sources': files(
             'location_provider_test.cc',
+            'metadata_table_test.cc',
             'metrics_config_test.cc',
+            'metrics_reporter_test.cc',
+            'metrics_test.cc',
             'snapshot_test.cc',
             'snapshot_util_test.cc',
             'table_metadata_builder_test.cc',
@@ -56,6 +59,13 @@ iceberg_tests = {
             'table_requirements_test.cc',
             'table_test.cc',
             'table_update_test.cc',
+        ),
+    },
+    'logging_test': {
+        'sources': files(
+            'cerr_logger_test.cc',
+            'log_level_test.cc',
+            'logger_test.cc',
         ),
     },
     'expression_test': {
@@ -83,25 +93,42 @@ iceberg_tests = {
     },
     'util_test': {
         'sources': files(
+            'base64_test.cc',
             'bucket_util_test.cc',
             'config_test.cc',
             'data_file_set_test.cc',
             'decimal_test.cc',
             'endian_test.cc',
+            'executor_util_test.cc',
+            'file_io_test.cc',
             'formatter_test.cc',
+            'lazy_test.cc',
             'location_util_test.cc',
+            'math_util_internal_test.cc',
             'position_delete_index_test.cc',
+            'position_delete_range_consumer_test.cc',
+            'retry_util_test.cc',
             'roaring_position_bitmap_test.cc',
             'string_util_test.cc',
             'struct_like_set_test.cc',
+            'task_group_test.cc',
+            'temporal_util_test.cc',
             'transform_util_test.cc',
             'truncate_util_test.cc',
             'url_encoder_test.cc',
             'uuid_test.cc',
             'visit_type_test.cc',
         ),
+        'use_data': true,
     },
-    'roaring_test': {'sources': files('roaring_test.cc')},
+    'puffin_test': {
+        'sources': files(
+            'puffin_format_test.cc',
+            'puffin_json_test.cc',
+            'puffin_reader_writer_test.cc',
+        ),
+        'use_data': true,
+    },
 }
 
 if get_option('rest').enabled()
@@ -110,12 +137,23 @@ if get_option('rest').enabled()
             'sources': files(
                 'auth_manager_test.cc',
                 'endpoint_test.cc',
+                'error_handlers_test.cc',
+                'http_client_ssl_test.cc',
+                'rest_file_io_test.cc',
                 'rest_json_serde_test.cc',
                 'rest_util_test.cc',
             ),
             'dependencies': [iceberg_rest_dep],
         },
     }
+    if aws_sdk_core_dep.found()
+        iceberg_tests += {
+            'sigv4_auth_test': {
+                'sources': files('sigv4_auth_test.cc'),
+                'dependencies': [iceberg_rest_dep, aws_sdk_core_dep],
+            },
+        }
+    endif
     if get_option('rest_integration_test').enabled()
         if host_machine.system() == 'windows'
             warning('Cannot build rest integration test on Windows, skipping.')
@@ -135,13 +173,17 @@ if get_option('rest').enabled()
 endif
 
 foreach test_name, values : iceberg_tests
+    test_deps = [gmock_main_dep] + values.get('dependencies', [])
+    if values.get('use_data', false)
+        test_deps = [iceberg_data_dep] + test_deps
+    else
+        test_deps = [iceberg_dep] + test_deps
+    endif
+
     exc = executable(
         test_name,
         sources: values['sources'],
-        dependencies: [iceberg_dep, gmock_main_dep] + values.get(
-            'dependencies',
-            [],
-        ),
+        dependencies: test_deps,
     )
     test(test_name, exc)
 endforeach

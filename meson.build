@@ -18,7 +18,7 @@
 project(
     'iceberg',
     'cpp',
-    version: '0.2.0',
+    version: '0.4.0',
     license: 'Apache-2.0',
     meson_version: '>=1.3.0',
     default_options: [
@@ -31,7 +31,9 @@ project(
 )
 
 cpp = meson.get_compiler('cpp')
-args = cpp.get_supported_arguments(['/bigobj'])
+# Hide two noisy MSVC warnings (C4251/C4275) about standard-library types used in
+# our public classes. They're harmless because the whole library ships as one DLL.
+args = cpp.get_supported_arguments(['/bigobj', '/wd4251', '/wd4275'])
 add_project_arguments(args, language: 'cpp')
 
 subdir('src')

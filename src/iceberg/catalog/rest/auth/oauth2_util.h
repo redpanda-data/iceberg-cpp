@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -46,40 +48,21 @@ inline constexpr std::string_view kBearerPrefix = "Bearer ";
 ICEBERG_REST_EXPORT Result<OAuthTokenResponse> FetchToken(
     HttpClient& client, AuthSession& session, const AuthProperties& properties);
 
-/// \brief Fetch an OAuth2 token using the client_credentials grant type with
-/// explicit parameters (not an AuthProperties bundle).
-///
-/// \param client HTTP client to use for the request.
-/// \param session Auth session for the request headers.
-/// \param token_endpoint Full URL of the OAuth2 token endpoint.
-/// \param client_id OAuth2 client ID.
-/// \param client_secret OAuth2 client secret.
-/// \param scope OAuth2 scope to request.
-/// \return The token response or an error.
-ICEBERG_REST_EXPORT Result<OAuthTokenResponse> FetchToken(
-    HttpClient& client, AuthSession& session, const std::string& token_endpoint,
-    const std::string& client_id, const std::string& client_secret,
-    const std::string& scope);
-
-/// \brief Refresh an expired access token using a refresh_token grant.
-///
-/// \param client HTTP client to use for the request.
-/// \param session Auth session for the request headers.
-/// \param token_endpoint Full URL of the OAuth2 token endpoint.
-/// \param client_id OAuth2 client ID.
-/// \param refresh_token The refresh token to use.
-/// \param scope OAuth2 scope to request.
-/// \return The refreshed token response or an error.
-ICEBERG_REST_EXPORT Result<OAuthTokenResponse> RefreshToken(
-    HttpClient& client, AuthSession& session, const std::string& token_endpoint,
-    const std::string& client_id, const std::string& refresh_token,
-    const std::string& scope);
-
 /// \brief Build auth headers from a token string.
 ///
 /// \param token Bearer token string (may be empty).
 /// \return Headers map with Authorization header if token is non-empty.
 ICEBERG_REST_EXPORT std::unordered_map<std::string, std::string> AuthHeaders(
     const std::string& token);
+
+/// \brief Extract expiration time from a JWT token.
+///
+/// Decodes the JWT payload (base64url) and reads the "exp" claim.
+/// Returns std::nullopt if the token is not a valid JWT or has no "exp" claim.
+///
+/// \param token A token string. If it is a JWT (three dot-separated base64url
+///        segments), the "exp" claim is extracted from the payload.
+/// \return Expiration time as milliseconds since epoch, or std::nullopt.
+ICEBERG_REST_EXPORT std::optional<int64_t> ExpiresAtMillis(std::string_view token);
 
 }  // namespace iceberg::rest::auth

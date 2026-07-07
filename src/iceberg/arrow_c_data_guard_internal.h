@@ -22,19 +22,26 @@
 #include <nanoarrow/nanoarrow.h>
 
 #include "iceberg/arrow_c_data.h"
+#include "iceberg/iceberg_export.h"
 
 namespace iceberg::internal {
 
-class ArrowArrayGuard {
+class ICEBERG_EXPORT ArrowArrayGuard {
  public:
   explicit ArrowArrayGuard(ArrowArray* array) : array_(array) {}
   ~ArrowArrayGuard();
+
+  /// \brief Release the guard without calling ArrowArrayRelease.
+  ///
+  /// Call this when ownership of the underlying ArrowArray has been
+  /// transferred elsewhere and the guard should not release it.
+  void Release() { array_ = nullptr; }
 
  private:
   ArrowArray* array_;
 };
 
-class ArrowSchemaGuard {
+class ICEBERG_EXPORT ArrowSchemaGuard {
  public:
   explicit ArrowSchemaGuard(ArrowSchema* schema) : schema_(schema) {}
   ~ArrowSchemaGuard();
@@ -43,7 +50,7 @@ class ArrowSchemaGuard {
   ArrowSchema* schema_;
 };
 
-class ArrowArrayViewGuard {
+class ICEBERG_EXPORT ArrowArrayViewGuard {
  public:
   explicit ArrowArrayViewGuard(ArrowArrayView* view) : view_(view) {}
   ~ArrowArrayViewGuard();
@@ -52,7 +59,7 @@ class ArrowArrayViewGuard {
   ArrowArrayView* view_;
 };
 
-class ArrowArrayBufferGuard {
+class ICEBERG_EXPORT ArrowArrayBufferGuard {
  public:
   explicit ArrowArrayBufferGuard(ArrowBuffer* buffer) : buffer_(buffer) {}
   ~ArrowArrayBufferGuard();

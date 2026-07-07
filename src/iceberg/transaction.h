@@ -106,6 +106,22 @@ class ICEBERG_EXPORT Transaction : public std::enable_shared_from_this<Transacti
   /// \brief Create a new FastAppend to append data files and commit the changes.
   Result<std::shared_ptr<FastAppend>> NewFastAppend();
 
+  /// \brief Create a new MergeAppend to append data files and merge manifests.
+  Result<std::shared_ptr<MergeAppend>> NewMergeAppend();
+
+  /// \brief Create a new DeleteFiles to delete data files and commit the changes.
+  Result<std::shared_ptr<DeleteFiles>> NewDeleteFiles();
+
+  /// \brief Create a new RowDelta to add rows and row-level deletes.
+  Result<std::shared_ptr<RowDelta>> NewRowDelta();
+
+  /// \brief Create a new OverwriteFiles to overwrite data files and commit the changes.
+  Result<std::shared_ptr<OverwriteFiles>> NewOverwrite();
+
+  /// \brief Create a new RewriteFiles to replace files in this table and commit the
+  /// changes.
+  Result<std::shared_ptr<RewriteFiles>> NewRewriteFiles();
+
   /// \brief Create a new SnapshotManager to manage snapshots.
   Result<std::shared_ptr<SnapshotManager>> NewSnapshotManager();
 
@@ -137,6 +153,12 @@ class ICEBERG_EXPORT Transaction : public std::enable_shared_from_this<Transacti
   Status ApplyUpdateSnapshotReference(UpdateSnapshotReference& update);
   Status ApplyUpdateSortOrder(UpdateSortOrder& update);
   Status ApplyUpdateStatistics(UpdateStatistics& update);
+
+  /// \brief Perform a single commit attempt
+  Result<std::shared_ptr<Table>> CommitOnce(bool is_first_attempt);
+
+  /// \brief Whether this transaction can retry after a commit conflict.
+  bool CanRetry() const;
 
  private:
   friend class PendingUpdate;

@@ -21,6 +21,7 @@
 
 #include <memory>
 
+#include <arrow/array.h>
 #include <arrow/array/builder_base.h>
 #include <arrow/c/bridge.h>
 #include <arrow/record_batch.h>
@@ -29,7 +30,7 @@
 #include <avro/Generic.hh>
 #include <avro/GenericDatum.hh>
 
-#include "iceberg/arrow/arrow_fs_file_io_internal.h"
+#include "iceberg/arrow/arrow_io_internal.h"
 #include "iceberg/arrow/arrow_status_internal.h"
 #include "iceberg/avro/avro_data_util_internal.h"
 #include "iceberg/avro/avro_direct_encoder_internal.h"
@@ -40,7 +41,6 @@
 #include "iceberg/metrics_config.h"
 #include "iceberg/schema.h"
 #include "iceberg/schema_internal.h"
-#include "iceberg/util/checked_cast.h"
 #include "iceberg/util/macros.h"
 
 namespace iceberg::avro {
@@ -49,8 +49,8 @@ namespace {
 
 Result<std::unique_ptr<AvroOutputStream>> CreateOutputStream(const WriterOptions& options,
                                                              int64_t buffer_size) {
-  auto io = internal::checked_pointer_cast<arrow::ArrowFileSystemFileIO>(options.io);
-  ICEBERG_ARROW_ASSIGN_OR_RETURN(auto output, io->fs()->OpenOutputStream(options.path));
+  ICEBERG_ASSIGN_OR_RAISE(auto output,
+                          arrow::OpenArrowOutputStream(options.io, options.path));
   return std::make_unique<AvroOutputStream>(output, buffer_size);
 }
 
@@ -179,12 +179,6 @@ class GenericDatumBackend : public AvroWriteBackend {
 
 class AvroWriter::Impl {
  public:
-  ~Impl() {
-    if (arrow_schema_.release != nullptr) {
-      ArrowSchemaRelease(&arrow_schema_);
-    }
-  }
-
   Status Open(const WriterOptions& options) {
     write_schema_ = options.schema;
 
@@ -228,19 +222,22 @@ class AvroWriter::Impl {
                        options.properties.Get(WriterProperties::kAvroSyncInterval), codec,
                        compression_level, metadata));
 
-    ICEBERG_RETURN_UNEXPECTED(ToArrowSchema(*write_schema_, &arrow_schema_));
+    ArrowSchema c_schema;
+    ICEBERG_RETURN_UNEXPECTED(ToArrowSchema(*write_schema_, &c_schema));
+    ICEBERG_ARROW_ASSIGN_OR_RETURN(arrow_schema_, ::arrow::ImportSchema(&c_schema));
     return {};
   }
 
   Status Write(ArrowArray* data) {
-    ICEBERG_ARROW_ASSIGN_OR_RETURN(auto result,
-                                   ::arrow::ImportArray(data, &arrow_schema_));
+    ICEBERG_ARROW_ASSIGN_OR_RETURN(auto batch,
+                                   ::arrow::ImportRecordBatch(data, arrow_schema_));
 
-    for (int64_t i = 0; i < result->length(); i++) {
-      ICEBERG_RETURN_UNEXPECTED(backend_->WriteRow(*write_schema_, *result, i));
+    ICEBERG_ARROW_ASSIGN_OR_RETURN(auto struct_array, batch->ToStructArray());
+    for (int64_t i = 0; i < struct_array->length(); i++) {
+      ICEBERG_RETURN_UNEXPECTED(backend_->WriteRow(*write_schema_, *struct_array, i));
     }
 
-    num_records_ += result->length();
+    num_records_ += struct_array->length();
     return {};
   }
 
@@ -279,8 +276,8 @@ class AvroWriter::Impl {
   std::shared_ptr<::avro::ValidSchema> avro_schema_;
   // Arrow output stream of the Avro file to write
   std::shared_ptr<::arrow::io::OutputStream> arrow_output_stream_;
-  // Arrow schema to write data.
-  ArrowSchema arrow_schema_;
+  // Arrow schema to import C data batches.
+  std::shared_ptr<::arrow::Schema> arrow_schema_;
   // Total length of the written Avro file.
   int64_t total_bytes_ = 0;
   // Number of records written.

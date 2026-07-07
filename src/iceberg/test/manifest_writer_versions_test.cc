@@ -25,7 +25,7 @@
 
 #include <gtest/gtest.h>
 
-#include "iceberg/arrow/arrow_file_io.h"
+#include "iceberg/arrow/arrow_io_util.h"
 #include "iceberg/avro/avro_register.h"
 #include "iceberg/constants.h"
 #include "iceberg/file_format.h"
@@ -433,6 +433,20 @@ TEST_F(ManifestWriterVersionsTest, TestV1WriteDelete) {
   EXPECT_THAT(status, IsError(ErrorKind::kInvalidArgument));
   EXPECT_THAT(status, HasErrorMessage(
                           "Cannot write equality_deletes file to data manifest file"));
+}
+
+TEST_F(ManifestWriterVersionsTest, TestWriteAddedEntryRejectsMissingDataFile) {
+  const std::string manifest_path = CreateManifestPath();
+  ICEBERG_UNWRAP_OR_FAIL(
+      auto writer, ManifestWriter::MakeWriter(/*format_version=*/2, kSnapshotId,
+                                              manifest_path, file_io_, spec_, schema_));
+
+  ManifestEntry entry;
+  entry.snapshot_id = kSnapshotId;
+
+  auto status = writer->WriteAddedEntry(entry);
+  EXPECT_THAT(status, IsError(ErrorKind::kInvalidArgument));
+  EXPECT_THAT(status, HasErrorMessage("Data file cannot be null"));
 }
 
 TEST_F(ManifestWriterVersionsTest, TestV1WriteWithInheritance) {

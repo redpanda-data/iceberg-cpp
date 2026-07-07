@@ -20,3 +20,11 @@ add_subdirectory(memory)
 if(ICEBERG_BUILD_REST)
   add_subdirectory(rest)
 endif()
+
+if(ICEBERG_BUILD_HIVE)
+  add_subdirectory(hive)
+endif()
+
+if(ICEBERG_BUILD_SQL_CATALOG)
+  add_subdirectory(sql)
+endif()

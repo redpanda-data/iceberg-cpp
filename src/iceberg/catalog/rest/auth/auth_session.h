@@ -19,12 +19,11 @@
 
 #pragma once
 
-#include <cstdint>
 #include <memory>
 #include <string>
-#include <string_view>
 #include <unordered_map>
 
+#include "iceberg/catalog/rest/http_request.h"
 #include "iceberg/catalog/rest/iceberg_rest_export.h"
 #include "iceberg/catalog/rest/type_fwd.h"
 #include "iceberg/result.h"
@@ -34,55 +33,26 @@
 
 namespace iceberg::rest::auth {
 
-/// \brief A description of an outgoing HTTP request that an AuthSession may
-///        need to inspect in order to authenticate (e.g., SigV4 needs the
-///        method, URL, query params and body hash to build its canonical
-///        request). Header-only auth schemes ignore it.
-struct SignableRequest {
-  /// HTTP method, uppercase (e.g., "GET", "POST").
-  std::string_view method;
-  /// Full request URL including scheme, host, path, but *without* query
-  /// string — query parameters are passed separately so callers don't need
-  /// to re-encode them.
-  std::string_view url;
-  /// Query parameters (pre-encoding). May be null for requests that have
-  /// none. Not owned.
-  const std::unordered_map<std::string, std::string>* query_params = nullptr;
-  /// Raw request body. Empty for GET/HEAD/DELETE without a body.
-  std::string_view body;
-};
-
 /// \brief An authentication session that can authenticate outgoing HTTP requests.
 class ICEBERG_REST_EXPORT AuthSession {
  public:
   virtual ~AuthSession() = default;
 
-  /// \brief Authenticate the given request headers.
+  /// \brief Authenticate an outgoing HTTP request.
   ///
-  /// This method adds authentication information (e.g., Authorization header)
-  /// to the provided headers map. The implementation should be idempotent.
+  /// Returns a request with authentication information (e.g., an Authorization
+  /// header) added. Implementations must be idempotent. The request is passed
+  /// by value so callers can move request bodies into the authentication path.
   ///
-  /// \param[in,out] headers The headers map to add authentication information to.
-  /// \return Status indicating success or one of the following errors:
+  /// \param request The request to authenticate.
+  /// \return The authenticated request on success, or one of:
   ///         - AuthenticationFailed: General authentication failure (invalid credentials,
   ///         etc.)
   ///         - TokenExpired: Authentication token has expired and needs refresh
   ///         - NotAuthorized: Not authenticated (401)
   ///         - IOError: Network or connection errors when reaching auth server
   ///         - RestError: HTTP errors from authentication service
-  virtual Status Authenticate(std::unordered_map<std::string, std::string>& headers) = 0;
-
-  /// \brief Authenticate using full request context.
-  ///
-  /// Overloaded form used by auth schemes that need to see the request method,
-  /// URL, query parameters and body in order to compute their header value
-  /// (e.g., SigV4). The default implementation ignores the request context and
-  /// forwards to the headers-only Authenticate(), which is what every non-
-  /// signing auth scheme wants.
-  virtual Status Authenticate(const SignableRequest& /*request*/,
-                              std::unordered_map<std::string, std::string>& headers) {
-    return Authenticate(headers);
-  }
+  virtual Result<HttpRequest> Authenticate(HttpRequest request) = 0;
 
   /// \brief Close the session and release any resources.
   ///
@@ -106,22 +76,28 @@ class ICEBERG_REST_EXPORT AuthSession {
 
   /// \brief Create an OAuth2 session with automatic token refresh.
   ///
-  /// This factory method creates a session that holds an access token and
-  /// optionally a refresh token. When Authenticate() is called and the token
-  /// is expired, it transparently refreshes the token before setting the
-  /// Authorization header.
+  /// This factory method creates a session that holds an access token and,
+  /// when keep_refreshed is enabled, schedules background refresh based on
+  /// token expiration. Authenticate() uses the latest cached Authorization
+  /// header and does not perform a synchronous token refresh.
   ///
   /// \param initial_token The initial token response from FetchToken().
   /// \param token_endpoint Full URL of the OAuth2 token endpoint for refresh.
   /// \param client_id OAuth2 client ID for refresh requests.
   /// \param client_secret OAuth2 client secret for re-fetch if refresh fails.
   /// \param scope OAuth2 scope for refresh requests.
-  /// \param client HTTP client for making refresh requests.
+  /// \param keep_refreshed Whether to schedule automatic token refresh.
+  /// \param optional_oauth_params Optional OAuth params (audience, resource) for refresh.
+  /// \param client HTTP client for making refresh requests. The caller owns the
+  ///        client and must keep it alive until the session is closed.
+  /// \param expiry_margin_seconds Seconds before expiry at which to refresh the token.
   /// \return A new session that manages token lifecycle automatically.
-  static std::shared_ptr<AuthSession> MakeOAuth2(
+  static Result<std::shared_ptr<AuthSession>> MakeOAuth2(
       const OAuthTokenResponse& initial_token, const std::string& token_endpoint,
       const std::string& client_id, const std::string& client_secret,
-      const std::string& scope, HttpClient& client, int64_t expiry_margin_seconds = 300);
+      const std::string& scope, bool keep_refreshed,
+      const std::unordered_map<std::string, std::string>& optional_oauth_params,
+      HttpClient& client, int64_t expiry_margin_seconds = 300);
 };
 
 }  // namespace iceberg::rest::auth

@@ -128,6 +128,9 @@ TYPED_TEST(TypedTableTest, Refresh) {
           .WillOnce(::testing::Return(refreshed));
     }
     EXPECT_THAT(table->Refresh(), IsOk());
+    if constexpr (std::is_same_v<TypeParam, Table>) {
+      EXPECT_EQ(table->metadata_file_location(), "s3://bucket/meta2.json");
+    }
   } else {
     EXPECT_THAT(table->Refresh(), IsError(ErrorKind::kNotSupported));
   }
@@ -142,6 +145,27 @@ TYPED_TEST(TypedTableTest, NewTransaction) {
   } else {
     EXPECT_THAT(table->NewTransaction(), IsError(ErrorKind::kNotSupported));
   }
+}
+
+TEST(StaticTableTest, NewMutatingOperationsAreNotSupported) {
+  auto io = std::make_shared<MockFileIO>();
+  auto schema = std::make_shared<Schema>(
+      std::vector<SchemaField>{SchemaField::MakeRequired(1, "id", int64())}, 1);
+  auto metadata = std::make_shared<TableMetadata>(
+      TableMetadata{.format_version = 2, .schemas = {schema}, .current_schema_id = 1});
+  TableIdentifier ident{.ns = Namespace{.levels = {"db"}}, .name = "test_table"};
+  ICEBERG_UNWRAP_OR_FAIL(auto table, StaticTable::Make(ident, std::move(metadata),
+                                                       "s3://bucket/meta.json", io));
+
+  EXPECT_THAT(table->NewUpdateStatistics(), IsError(ErrorKind::kNotSupported));
+  EXPECT_THAT(table->NewUpdatePartitionStatistics(), IsError(ErrorKind::kNotSupported));
+  EXPECT_THAT(table->NewFastAppend(), IsError(ErrorKind::kNotSupported));
+  EXPECT_THAT(table->NewMergeAppend(), IsError(ErrorKind::kNotSupported));
+  EXPECT_THAT(table->NewDeleteFiles(), IsError(ErrorKind::kNotSupported));
+  EXPECT_THAT(table->NewRowDelta(), IsError(ErrorKind::kNotSupported));
+  EXPECT_THAT(table->NewOverwrite(), IsError(ErrorKind::kNotSupported));
+  EXPECT_THAT(table->NewRewriteFiles(), IsError(ErrorKind::kNotSupported));
+  EXPECT_THAT(table->NewSnapshotManager(), IsError(ErrorKind::kNotSupported));
 }
 
 }  // namespace iceberg

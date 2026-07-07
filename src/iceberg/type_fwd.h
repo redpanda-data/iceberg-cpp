@@ -31,7 +31,7 @@ namespace iceberg {
 /// This is not a complete data type by itself because some types are nested
 /// and/or parameterized.
 ///
-/// Iceberg V3 types are not currently supported.
+/// Iceberg V3's `unknown` type is supported as a null-only placeholder type.
 enum class TypeId {
   kStruct,
   kList,
@@ -46,15 +46,31 @@ enum class TypeId {
   kTime,
   kTimestamp,
   kTimestampTz,
+  kTimestampNs,
+  kTimestampTzNs,
   kString,
   kUuid,
   kFixed,
   kBinary,
+  kUnknown,
+  kVariant,
+  kGeometry,
+  kGeography,
 };
 
 /// \brief The time unit.  In Iceberg V3 nanoseconds are also supported.
 enum class TimeUnit {
   kMicrosecond,
+  kNanosecond,
+};
+
+/// \brief The algorithm used to interpolate geography edges.
+enum class EdgeAlgorithm {
+  kSpherical,
+  kVincenty,
+  kThomas,
+  kAndoyer,
+  kKarney,
 };
 
 /// \brief Data type family.
@@ -77,8 +93,14 @@ class TimeType;
 class TimestampBase;
 class TimestampType;
 class TimestampTzType;
+class TimestampNsType;
+class TimestampTzNsType;
 class Type;
+class UnknownType;
 class UuidType;
+class VariantType;
+class GeographyType;
+class GeometryType;
 
 /// \brief Data values.
 class Decimal;
@@ -179,9 +201,15 @@ class PartitionSummary;
 /// \brief File I/O.
 struct ReaderOptions;
 struct WriterOptions;
+struct StorageCredential;
 class FileIO;
 class Reader;
 class Writer;
+
+class InputFile;
+class OutputFile;
+class PositionOutputStream;
+class SeekableInputStream;
 
 /// \brief Row-based data structures.
 class ArrayLike;
@@ -195,6 +223,8 @@ using UncheckedStructLikeSet = StructLikeSet<false>;
 /// \brief Catalog
 class Catalog;
 class LocationProvider;
+class SessionCatalog;
+struct SessionContext;
 
 /// \brief Table.
 class Table;
@@ -209,9 +239,14 @@ class Transaction;
 class TransactionContext;
 
 /// \brief Update family.
+class DeleteFiles;
 class ExpireSnapshots;
 class FastAppend;
+class MergeAppend;
+class OverwriteFiles;
 class PendingUpdate;
+class RewriteFiles;
+class RowDelta;
 class SetSnapshot;
 class SnapshotManager;
 class SnapshotUpdate;
@@ -228,10 +263,12 @@ class UpdateStatistics;
 class DeleteLoader;
 class PositionDeleteIndex;
 
-/// ----------------------------------------------------------------------------
-/// TODO: Forward declarations below are not added yet.
-/// ----------------------------------------------------------------------------
+/// \brief Metadata tables.
+class HistoryTable;
+class MetadataTable;
+class SnapshotsTable;
 
-class EncryptedKey;
+/// \brief Table encryption
+struct EncryptedKey;
 
 }  // namespace iceberg

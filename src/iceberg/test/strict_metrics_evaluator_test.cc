@@ -536,6 +536,24 @@ class StrictMetricsEvaluatorMigratedTest : public StrictMetricsEvaluatorTest {
     return data_file;
   }
 
+  std::shared_ptr<DataFile> MakeUnknownRecordCountFile() {
+    auto data_file = std::make_shared<DataFile>();
+    data_file->file_path = "unknown.parquet";
+    data_file->file_format = FileFormatType::kParquet;
+    // -1 is the sentinel for an unknown row count.
+    data_file->record_count = -1;
+    return data_file;
+  }
+
+  std::shared_ptr<DataFile> MakeInvalidRecordCountFile() {
+    auto data_file = std::make_shared<DataFile>();
+    data_file->file_path = "invalid.parquet";
+    data_file->file_format = FileFormatType::kParquet;
+    // Anything below the -1 sentinel is invalid metadata.
+    data_file->record_count = -2;
+    return data_file;
+  }
+
   void ExpectShouldRead(const std::shared_ptr<Expression>& expr, bool expected,
                         std::shared_ptr<DataFile> file = nullptr,
                         bool case_sensitive = true) {
@@ -648,6 +666,23 @@ TEST_F(StrictMetricsEvaluatorMigratedTest, ZeroRecordFile) {
   for (const auto& expr : expressions) {
     ExpectShouldRead(expr, true, zero_record_file);
   }
+}
+
+TEST_F(StrictMetricsEvaluatorMigratedTest, UnknownRecordCountFile) {
+  // A file with an unknown row count (record_count == -1) must not be treated as if
+  // every row matches the predicate. AlwaysFalse can never match all rows.
+  auto unknown_record_count_file = MakeUnknownRecordCountFile();
+  ExpectShouldRead(Expressions::AlwaysFalse(), false, unknown_record_count_file);
+}
+
+TEST_F(StrictMetricsEvaluatorMigratedTest, InvalidRecordCountFile) {
+  // A record count below the -1 unknown sentinel is invalid and must error out.
+  auto invalid_record_count_file = MakeInvalidRecordCountFile();
+  ICEBERG_UNWRAP_OR_FAIL(auto evaluator, StrictMetricsEvaluator::Make(
+                                             Expressions::AlwaysFalse(), schema_, true));
+  auto result = evaluator->Evaluate(*invalid_record_count_file);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().kind, ErrorKind::kInvalidArgument);
 }
 
 TEST_F(StrictMetricsEvaluatorMigratedTest, Not) {
@@ -844,6 +879,69 @@ TEST_F(StrictMetricsEvaluatorMigratedTest, EvaluateOnNestedColumnWithStats) {
                    false);
   ExpectShouldRead(Expressions::IsNull("struct.nested_col_with_stats"), false);
   ExpectShouldRead(Expressions::NotNull("struct.nested_col_with_stats"), false);
+}
+
+TEST(StrictMetricsEvaluatorRegressionTest, MissingNullCountForField) {
+  // Field 14 (no_nan_stats, float64, optional) has bounds and value_counts but is
+  // missing from null_value_counts. The evaluator must conservatively assume nulls
+  // may exist and return kRowsMightNotMatch for comparison operators.
+  auto schema = std::make_shared<Schema>(
+      std::vector<SchemaField>{
+          SchemaField::MakeOptional(14, "no_nan_stats", float64()),
+      },
+      /*schema_id=*/0);
+
+  auto data_file = std::make_shared<DataFile>();
+  data_file->file_path = "null_test.parquet";
+  data_file->file_format = FileFormatType::kParquet;
+  data_file->record_count = 50;
+  data_file->value_counts = {{14, 50L}};
+  data_file->null_value_counts = {{4, 0L}, {5, 0L}};
+  data_file->nan_value_counts = {{14, 0L}};
+  data_file->lower_bounds = {{14, Literal::Double(1.0).Serialize().value()}};
+  data_file->upper_bounds = {{14, Literal::Double(100.0).Serialize().value()}};
+
+  auto evaluate = [&](const std::shared_ptr<Expression>& expr) {
+    ICEBERG_UNWRAP_OR_FAIL(auto eval, StrictMetricsEvaluator::Make(expr, schema, true));
+    ICEBERG_UNWRAP_OR_FAIL(auto result, eval->Evaluate(*data_file));
+    EXPECT_EQ(result, kRowsMightNotMatch) << expr->ToString();
+  };
+
+  evaluate(Expressions::LessThan("no_nan_stats", Literal::Double(200.0)));
+  evaluate(Expressions::LessThanOrEqual("no_nan_stats", Literal::Double(200.0)));
+  evaluate(Expressions::GreaterThan("no_nan_stats", Literal::Double(-1.0)));
+  evaluate(Expressions::GreaterThanOrEqual("no_nan_stats", Literal::Double(-1.0)));
+  evaluate(Expressions::Equal("no_nan_stats", Literal::Double(50.0)));
+}
+
+TEST(StrictMetricsEvaluatorRegressionTest, MissingNanCountForField) {
+  // Field 14 (no_nan_stats, float64, optional) is missing from nan_value_counts.
+  // For a floating-point field, the evaluator must conservatively assume NaNs may
+  // exist and return kRowsMightNotMatch for comparison operators.
+  auto schema = std::make_shared<Schema>(
+      std::vector<SchemaField>{
+          SchemaField::MakeOptional(14, "no_nan_stats", float64()),
+      },
+      /*schema_id=*/0);
+
+  auto data_file = std::make_shared<DataFile>();
+  data_file->file_path = "nan_test.parquet";
+  data_file->file_format = FileFormatType::kParquet;
+  data_file->record_count = 50;
+  data_file->value_counts = {{14, 50L}};
+  data_file->null_value_counts = {{14, 0L}};
+  data_file->nan_value_counts = {{8, 0L}};
+  data_file->lower_bounds = {{14, Literal::Double(1.0).Serialize().value()}};
+  data_file->upper_bounds = {{14, Literal::Double(100.0).Serialize().value()}};
+
+  auto evaluate = [&](const std::shared_ptr<Expression>& expr) {
+    ICEBERG_UNWRAP_OR_FAIL(auto eval, StrictMetricsEvaluator::Make(expr, schema, true));
+    ICEBERG_UNWRAP_OR_FAIL(auto result, eval->Evaluate(*data_file));
+    EXPECT_EQ(result, kRowsMightNotMatch) << expr->ToString();
+  };
+
+  evaluate(Expressions::LessThan("no_nan_stats", Literal::Double(200.0)));
+  evaluate(Expressions::GreaterThan("no_nan_stats", Literal::Double(-1.0)));
 }
 
 }  // namespace iceberg

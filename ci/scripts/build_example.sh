@@ -21,12 +21,14 @@ set -eux
 
 source_dir=${1}
 build_dir=${1}/build
+run_example=${ICEBERG_RUN_EXAMPLE:-OFF}
 
-mkdir ${build_dir}
+rm -rf "${build_dir}"
+mkdir "${build_dir}"
 pushd ${build_dir}
 
 is_windows() {
-    [[ "${OSTYPE}" == "msys" || "${OSTYPE}" == "win32" ]]
+    [[ "${OSTYPE}" == "msys" || "${OSTYPE}" == "win32" || "${OSTYPE}" == "cygwin" ]]
 }
 
 CMAKE_ARGS=(
@@ -44,11 +46,18 @@ fi
 cmake "${CMAKE_ARGS[@]}" ${source_dir}
 if is_windows; then
   cmake --build . --config Release
+  if [[ "${run_example}" == "ON" ]]; then
+    if [[ -x ./demo_example.exe ]]; then
+      ./demo_example.exe
+    else
+      ./Release/demo_example.exe
+    fi
+  fi
 else
   cmake --build .
+  if [[ "${run_example}" == "ON" ]]; then
+    ./demo_example
+  fi
 fi
 
 popd
-
-# clean up between builds
-rm -rf ${build_dir}

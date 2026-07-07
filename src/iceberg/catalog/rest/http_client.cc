@@ -19,18 +19,17 @@
 
 #include "iceberg/catalog/rest/http_client.h"
 
+#include <map>
+#include <string_view>
+
 #include <cpr/cpr.h>
-#include <nlohmann/json.hpp>
 
 #include "iceberg/catalog/rest/auth/auth_session.h"
 #include "iceberg/catalog/rest/constant.h"
 #include "iceberg/catalog/rest/error_handlers.h"
-#include "iceberg/catalog/rest/json_serde_internal.h"
 #include "iceberg/catalog/rest/rest_util.h"
-#include "iceberg/json_serde_internal.h"
 #include "iceberg/result.h"
 #include "iceberg/util/macros.h"
-#include "iceberg/util/url_encoder.h"
 
 namespace iceberg::rest {
 
@@ -66,51 +65,10 @@ std::unordered_map<std::string, std::string> HttpResponse::headers() const {
 
 namespace {
 
-/// \brief Default error type for unparseable REST responses.
-constexpr std::string_view kRestExceptionType = "RESTException";
-
-/// \brief Prepare headers for an HTTP request.
-///
-/// Merges default + per-request headers and then lets the AuthSession
-/// authenticate the request. The full request context (method, URL, query
-/// params, body) is forwarded to the session so auth schemes that need to
-/// sign over the request (e.g., SigV4) see what they need; header-only
-/// schemes ignore the extra context.
-Result<cpr::Header> BuildHeaders(
-    std::string_view method, std::string_view url,
-    const std::unordered_map<std::string, std::string>* query_params,
-    std::string_view body,
-    const std::unordered_map<std::string, std::string>& request_headers,
-    const std::unordered_map<std::string, std::string>& default_headers,
-    auth::AuthSession& session) {
-  std::unordered_map<std::string, std::string> headers(default_headers);
-  for (const auto& [key, val] : request_headers) {
-    headers.insert_or_assign(key, val);
-  }
-  auth::SignableRequest signable{
-      .method = method, .url = url, .query_params = query_params, .body = body};
-  ICEBERG_RETURN_UNEXPECTED(session.Authenticate(signable, headers));
-  return cpr::Header(headers.begin(), headers.end());
-}
-
-/// \brief Serialize a form-data map to an application/x-www-form-urlencoded
-///        body string. Used so that SigV4 can hash the payload it will
-///        actually see on the wire.
-std::string EncodeFormBody(
-    const std::unordered_map<std::string, std::string>& form_data) {
-  std::string out;
-  bool first = true;
-  for (const auto& [key, val] : form_data) {
-    if (!first) {
-      out.push_back('&');
-    }
-    first = false;
-    out.append(UrlEncoder::Encode(key));
-    out.push_back('=');
-    out.append(UrlEncoder::Encode(val));
-  }
-  return out;
-}
+constexpr std::string_view kSslVerifyKey = "ssl.verify";
+constexpr std::string_view kSslCaInfoKey = "ssl.ca-info";
+constexpr std::string_view kSslCaPathKey = "ssl.ca-path";
+constexpr std::string_view kSslCrlFileKey = "ssl.crl-file";
 
 cpr::SslOptions BuildSslOptions(const SslConfig& config) {
   cpr::SslOptions opts;
@@ -128,14 +86,60 @@ cpr::SslOptions BuildSslOptions(const SslConfig& config) {
   return opts;
 }
 
-/// \brief Converts a map of string key-value pairs to cpr::Parameters.
-cpr::Parameters GetParameters(
-    const std::unordered_map<std::string, std::string>& params) {
-  cpr::Parameters cpr_params;
-  for (const auto& [key, val] : params) {
-    cpr_params.Add({key, val});
+/// \brief Default error type for unparseable REST responses.
+constexpr std::string_view kRestExceptionType = "RESTException";
+
+/// \brief Merge default headers with per-request headers (per-request wins).
+HttpHeaders MergeHeaders(
+    const std::unordered_map<std::string, std::string>& default_headers,
+    const std::unordered_map<std::string, std::string>& request_headers) {
+  HttpHeaders merged;
+  for (const auto& [key, val] : default_headers) {
+    merged.try_emplace(key, val);
   }
-  return cpr_params;
+  for (const auto& [key, val] : request_headers) {
+    merged[key] = val;
+  }
+  return merged;
+}
+
+cpr::Header ToCprHeader(const HttpRequest& request) {
+  return {request.headers.begin(), request.headers.end()};
+}
+
+/// \brief Append URL-encoded query parameters to a URL, sorted by key.
+/// \param base_url must not already contain a query string. Callers pass query
+///        parameters separately so authentication signs one unambiguous final URL.
+Result<std::string> AppendQueryString(
+    const std::string& base_url,
+    const std::unordered_map<std::string, std::string>& params) {
+  if (params.empty()) return base_url;
+  if (base_url.find('?') != std::string::npos) {
+    return InvalidArgument(
+        "HttpClient base URL must not contain a query string when query parameters "
+        "are passed separately: {}",
+        base_url);
+  }
+  std::map<std::string, std::string> sorted(params.begin(), params.end());
+  std::string url = base_url + "?";
+  bool first = true;
+  for (const auto& [k, v] : sorted) {
+    if (!first) url += "&";
+    ICEBERG_ASSIGN_OR_RAISE(auto ek, EncodeString(k));
+    ICEBERG_ASSIGN_OR_RAISE(auto ev, EncodeString(v));
+    url += ek + "=" + ev;
+    first = false;
+  }
+  return url;
+}
+
+Result<HttpRequest> AuthenticateRequest(auth::AuthSession& session, HttpMethod method,
+                                        std::string url, HttpHeaders headers,
+                                        std::string body = "") {
+  return session.Authenticate({.method = method,
+                               .url = std::move(url),
+                               .headers = std::move(headers),
+                               .body = std::move(body)});
 }
 
 /// \brief Checks if the HTTP status code indicates a successful response.
@@ -148,29 +152,12 @@ bool IsSuccessful(int32_t status_code) {
 
 /// \brief Builds a default ErrorResponse when the response body cannot be parsed.
 ErrorResponse BuildDefaultErrorResponse(const cpr::Response& response) {
-  std::string message;
-  if (response.error) {
-    message = response.error.message;
-  } else if (!response.reason.empty()) {
-    message = response.reason;
-  } else {
-    message = GetStandardReasonPhrase(response.status_code);
-  }
   return {
       .code = static_cast<uint32_t>(response.status_code),
       .type = std::string(kRestExceptionType),
-      .message = std::move(message),
+      .message = !response.reason.empty() ? response.reason
+                                          : GetStandardReasonPhrase(response.status_code),
   };
-}
-
-/// \brief Tries to parse the response body as an ErrorResponse.
-Result<ErrorResponse> TryParseErrorResponse(const std::string& text) {
-  if (text.empty()) {
-    return InvalidArgument("Empty response body");
-  }
-  ICEBERG_ASSIGN_OR_RAISE(auto json_result, FromJsonString(text));
-  ICEBERG_ASSIGN_OR_RAISE(auto error_result, ErrorResponseFromJson(json_result));
-  return error_result;
 }
 
 /// \brief Handles failure responses by invoking the provided error handler.
@@ -179,13 +166,32 @@ Status HandleFailureResponse(const cpr::Response& response,
   if (IsSuccessful(response.status_code)) {
     return {};
   }
-  auto parse_result = TryParseErrorResponse(response.text);
+  auto parse_result = error_handler.ParseResponse(
+      static_cast<uint32_t>(response.status_code), response.text);
   const ErrorResponse final_error =
       parse_result.value_or(BuildDefaultErrorResponse(response));
   return error_handler.Accept(final_error);
 }
 
 }  // namespace
+
+SslConfig SslConfigFromProperties(
+    const std::unordered_map<std::string, std::string>& properties) {
+  SslConfig ssl;
+  if (auto it = properties.find(std::string(kSslVerifyKey)); it != properties.end()) {
+    ssl.verify = it->second != "false";
+  }
+  if (auto it = properties.find(std::string(kSslCaInfoKey)); it != properties.end()) {
+    ssl.ca_info = it->second;
+  }
+  if (auto it = properties.find(std::string(kSslCaPathKey)); it != properties.end()) {
+    ssl.ca_path = it->second;
+  }
+  if (auto it = properties.find(std::string(kSslCrlFileKey)); it != properties.end()) {
+    ssl.crl_file = it->second;
+  }
+  return ssl;
+}
 
 HttpClient::HttpClient(std::unordered_map<std::string, std::string> default_headers,
                        SslConfig ssl_config)
@@ -205,11 +211,13 @@ Result<HttpResponse> HttpClient::Get(
     const std::string& path, const std::unordered_map<std::string, std::string>& params,
     const std::unordered_map<std::string, std::string>& headers,
     const ErrorHandler& error_handler, auth::AuthSession& session) {
-  ICEBERG_ASSIGN_OR_RAISE(auto all_headers,
-                          BuildHeaders("GET", path, &params, /*body=*/{}, headers,
-                                       default_headers_, session));
-  cpr::Response response = cpr::Get(cpr::Url{path}, GetParameters(params), all_headers,
-                                    BuildSslOptions(ssl_config_), *connection_pool_);
+  ICEBERG_ASSIGN_OR_RAISE(auto url, AppendQueryString(path, params));
+  ICEBERG_ASSIGN_OR_RAISE(auto authenticated,
+                          AuthenticateRequest(session, HttpMethod::kGet, std::move(url),
+                                              MergeHeaders(default_headers_, headers)));
+  cpr::Response response =
+      cpr::Get(cpr::Url{authenticated.url}, ToCprHeader(authenticated),
+               BuildSslOptions(ssl_config_), *connection_pool_);
 
   ICEBERG_RETURN_UNEXPECTED(HandleFailureResponse(response, error_handler));
   HttpResponse http_response;
@@ -221,11 +229,13 @@ Result<HttpResponse> HttpClient::Post(
     const std::string& path, const std::string& body,
     const std::unordered_map<std::string, std::string>& headers,
     const ErrorHandler& error_handler, auth::AuthSession& session) {
-  ICEBERG_ASSIGN_OR_RAISE(auto all_headers,
-                          BuildHeaders("POST", path, /*query_params=*/nullptr, body,
-                                       headers, default_headers_, session));
-  cpr::Response response = cpr::Post(cpr::Url{path}, cpr::Body{body}, all_headers,
-                                     BuildSslOptions(ssl_config_), *connection_pool_);
+  ICEBERG_ASSIGN_OR_RAISE(
+      auto authenticated,
+      AuthenticateRequest(session, HttpMethod::kPost, path,
+                          MergeHeaders(default_headers_, headers), body));
+  cpr::Response response = cpr::Post(
+      cpr::Url{authenticated.url}, cpr::Body{authenticated.body},
+      ToCprHeader(authenticated), BuildSslOptions(ssl_config_), *connection_pool_);
 
   ICEBERG_RETURN_UNEXPECTED(HandleFailureResponse(response, error_handler));
   HttpResponse http_response;
@@ -240,20 +250,22 @@ Result<HttpResponse> HttpClient::PostForm(
     const ErrorHandler& error_handler, auth::AuthSession& session) {
   std::unordered_map<std::string, std::string> form_headers(headers);
   form_headers.insert_or_assign(kHeaderContentType, kMimeTypeFormUrlEncoded);
-  // Encode the form body ourselves so that the same bytes we'll send on the
-  // wire are available to sign (SigV4 hashes the payload).
-  std::string form_body = EncodeFormBody(form_data);
-  ICEBERG_ASSIGN_OR_RAISE(auto all_headers,
-                          BuildHeaders("POST", path, /*query_params=*/nullptr, form_body,
-                                       form_headers, default_headers_, session));
   std::vector<cpr::Pair> pair_list;
   pair_list.reserve(form_data.size());
   for (const auto& [key, val] : form_data) {
     pair_list.emplace_back(key, val);
   }
-  cpr::Response response =
-      cpr::Post(cpr::Url{path}, cpr::Payload(pair_list.begin(), pair_list.end()),
-                all_headers, BuildSslOptions(ssl_config_), *connection_pool_);
+  // Sign the exact bytes cpr will put on the wire.
+  std::string encoded_body =
+      cpr::Payload(pair_list.begin(), pair_list.end()).GetContent();
+  ICEBERG_ASSIGN_OR_RAISE(
+      auto authenticated,
+      AuthenticateRequest(session, HttpMethod::kPost, path,
+                          MergeHeaders(default_headers_, form_headers),
+                          std::move(encoded_body)));
+  cpr::Response response = cpr::Post(
+      cpr::Url{authenticated.url}, cpr::Body{authenticated.body},
+      ToCprHeader(authenticated), BuildSslOptions(ssl_config_), *connection_pool_);
 
   ICEBERG_RETURN_UNEXPECTED(HandleFailureResponse(response, error_handler));
   HttpResponse http_response;
@@ -264,11 +276,12 @@ Result<HttpResponse> HttpClient::PostForm(
 Result<HttpResponse> HttpClient::Head(
     const std::string& path, const std::unordered_map<std::string, std::string>& headers,
     const ErrorHandler& error_handler, auth::AuthSession& session) {
-  ICEBERG_ASSIGN_OR_RAISE(
-      auto all_headers, BuildHeaders("HEAD", path, /*query_params=*/nullptr, /*body=*/{},
-                                     headers, default_headers_, session));
-  cpr::Response response = cpr::Head(cpr::Url{path}, all_headers,
-                                     BuildSslOptions(ssl_config_), *connection_pool_);
+  ICEBERG_ASSIGN_OR_RAISE(auto authenticated,
+                          AuthenticateRequest(session, HttpMethod::kHead, path,
+                                              MergeHeaders(default_headers_, headers)));
+  cpr::Response response =
+      cpr::Head(cpr::Url{authenticated.url}, ToCprHeader(authenticated),
+                BuildSslOptions(ssl_config_), *connection_pool_);
 
   ICEBERG_RETURN_UNEXPECTED(HandleFailureResponse(response, error_handler));
   HttpResponse http_response;
@@ -280,11 +293,14 @@ Result<HttpResponse> HttpClient::Delete(
     const std::string& path, const std::unordered_map<std::string, std::string>& params,
     const std::unordered_map<std::string, std::string>& headers,
     const ErrorHandler& error_handler, auth::AuthSession& session) {
-  ICEBERG_ASSIGN_OR_RAISE(auto all_headers,
-                          BuildHeaders("DELETE", path, &params, /*body=*/{}, headers,
-                                       default_headers_, session));
-  cpr::Response response = cpr::Delete(cpr::Url{path}, GetParameters(params), all_headers,
-                                       BuildSslOptions(ssl_config_), *connection_pool_);
+  ICEBERG_ASSIGN_OR_RAISE(auto url, AppendQueryString(path, params));
+  ICEBERG_ASSIGN_OR_RAISE(
+      auto authenticated,
+      AuthenticateRequest(session, HttpMethod::kDelete, std::move(url),
+                          MergeHeaders(default_headers_, headers)));
+  cpr::Response response =
+      cpr::Delete(cpr::Url{authenticated.url}, ToCprHeader(authenticated),
+                  BuildSslOptions(ssl_config_), *connection_pool_);
 
   ICEBERG_RETURN_UNEXPECTED(HandleFailureResponse(response, error_handler));
   HttpResponse http_response;

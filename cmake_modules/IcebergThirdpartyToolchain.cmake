@@ -19,6 +19,59 @@
 # third party libraries.
 set(ICEBERG_SYSTEM_DEPENDENCIES)
 set(ICEBERG_ARROW_INSTALL_INTERFACE_LIBS)
+set(ICEBERG_AWSSDK_BUNDLED FALSE)
+if(ICEBERG_S3 AND ICEBERG_BUNDLE_AWSSDK)
+  if(NOT ICEBERG_BUILD_BUNDLE)
+    message(FATAL_ERROR "ICEBERG_BUNDLE_AWSSDK requires ICEBERG_BUILD_BUNDLE to be ON")
+  endif()
+  set(ICEBERG_AWSSDK_BUNDLED TRUE)
+endif()
+
+# Mirror the AWS SDK bundle/system policy for Thrift (used by the Hive catalog):
+# ICEBERG_BUNDLE_THRIFT is the user's intent, ICEBERG_THRIFT_BUNDLED the resolved
+# conclusion that the rest of the build keys off.
+set(ICEBERG_THRIFT_BUNDLED FALSE)
+if(ICEBERG_BUILD_HIVE AND ICEBERG_BUNDLE_THRIFT)
+  if(NOT ICEBERG_BUILD_BUNDLE)
+    message(FATAL_ERROR "ICEBERG_BUNDLE_THRIFT requires ICEBERG_BUILD_BUNDLE to be ON")
+  endif()
+  set(ICEBERG_THRIFT_BUNDLED TRUE)
+endif()
+
+set(ICEBERG_AWSSDK_COMPONENTS)
+if(NOT ICEBERG_AWSSDK_BUNDLED)
+  if(ICEBERG_S3)
+    list(APPEND
+         ICEBERG_AWSSDK_COMPONENTS
+         core
+         config
+         s3
+         transfer
+         identity-management
+         sts)
+  elseif(ICEBERG_SIGV4)
+    list(APPEND ICEBERG_AWSSDK_COMPONENTS core)
+  endif()
+endif()
+
+# ----------------------------------------------------------------------
+# AWS SDK for C++
+
+function(resolve_aws_sdk_dependency)
+  if(NOT ICEBERG_AWSSDK_COMPONENTS)
+    return()
+  endif()
+  find_package(AWSSDK REQUIRED COMPONENTS ${ICEBERG_AWSSDK_COMPONENTS})
+  list(APPEND ICEBERG_SYSTEM_DEPENDENCIES AWSSDK)
+  set(ICEBERG_SYSTEM_DEPENDENCIES
+      ${ICEBERG_SYSTEM_DEPENDENCIES}
+      PARENT_SCOPE)
+  # Forwarded to find_dependency(AWSSDK ...) in iceberg-config.cmake.in so
+  # downstream installed builds load the same AWS SDK targets.
+  set(ICEBERG_FIND_EXTRA_ARGS_AWSSDK
+      "COMPONENTS;${ICEBERG_AWSSDK_COMPONENTS}"
+      PARENT_SCOPE)
+endfunction()
 
 # ----------------------------------------------------------------------
 # Versions and URLs for toolchain builds
@@ -31,16 +84,17 @@ set(ICEBERG_ARROW_INSTALL_INTERFACE_LIBS)
 # ICEBERG_NANOARROW_URL      - Nanoarrow tarball URL
 # ICEBERG_CROARING_URL       - CRoaring tarball URL
 # ICEBERG_NLOHMANN_JSON_URL  - nlohmann-json tarball URL
+# ICEBERG_SPDLOG_URL         - spdlog tarball URL
 # ICEBERG_CPR_URL            - cpr tarball URL
 #
 # Example usage:
-#   export ICEBERG_ARROW_URL="https://your-mirror.com/apache-arrow-22.0.0.tar.gz"
+#   export ICEBERG_ARROW_URL="https://your-mirror.com/apache-arrow-24.0.0.tar.gz"
 #   cmake -S . -B build
 #
 
-set(ICEBERG_ARROW_BUILD_VERSION "22.0.0")
+set(ICEBERG_ARROW_BUILD_VERSION "24.0.0")
 set(ICEBERG_ARROW_BUILD_SHA256_CHECKSUM
-    "131250cd24dec0cddde04e2ad8c9e2bc43edc5e84203a81cf71cf1a33a6e7e0f")
+    "9a8094d24fa33b90c672ab77fdda253f29300c8b0dd3f0b8e55a29dbd98b82c9")
 
 if(DEFINED ENV{ICEBERG_ARROW_URL})
   set(ARROW_SOURCE_URL "$ENV{ICEBERG_ARROW_URL}")
@@ -102,16 +156,21 @@ function(resolve_arrow_dependency)
   # Work around undefined symbol: arrow::ipc::ReadSchema(arrow::io::InputStream*, arrow::ipc::DictionaryMemo*)
   set(ARROW_IPC ON)
   set(ARROW_FILESYSTEM ON)
+  set(ARROW_S3 ${ICEBERG_S3})
   set(ARROW_JSON ON)
   set(ARROW_PARQUET ON)
+  set(ARROW_ENABLE_THREADING ON)
   set(ARROW_SIMD_LEVEL "NONE")
   set(ARROW_RUNTIME_SIMD_LEVEL "NONE")
   set(ARROW_POSITION_INDEPENDENT_CODE ON)
   set(ARROW_DEPENDENCY_SOURCE "BUNDLED")
   set(ARROW_WITH_ZLIB ON)
+  if(ICEBERG_S3 AND NOT ICEBERG_AWSSDK_BUNDLED)
+    set(AWSSDK_SOURCE "SYSTEM")
+  endif()
   set(ZLIB_SOURCE "SYSTEM")
   set(ARROW_VERBOSE_THIRDPARTY_BUILD OFF)
-  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD 20)
 
   fetchcontent_declare(VendoredArrow
                        ${FC_DECLARE_COMMON_OPTIONS}
@@ -164,16 +223,18 @@ function(resolve_arrow_dependency)
       install(FILES ${arrow_bundled_dependencies_location}
               DESTINATION ${ICEBERG_INSTALL_LIBDIR})
     endif()
+
+    # Arrow's exported static target interface may reference system libraries
+    # (e.g. Threads, OpenSSL, CURL, ZLIB) that consumers need to find.
+    list(APPEND ICEBERG_SYSTEM_DEPENDENCIES Threads ZLIB)
+    if(ARROW_S3)
+      list(APPEND ICEBERG_SYSTEM_DEPENDENCIES OpenSSL CURL)
+    endif()
   else()
     set(ARROW_VENDORED FALSE)
     find_package(Arrow CONFIG REQUIRED)
-    list(APPEND ICEBERG_SYSTEM_DEPENDENCIES Arrow)
-    # Parquet may be bundled as a component of Arrow (e.g. Conan's arrow recipe).
-    # Only do a separate find_package if Arrow didn't already provide the target.
-    if(NOT TARGET Parquet::parquet_static AND NOT TARGET Parquet::parquet_shared)
-      find_package(Parquet CONFIG REQUIRED)
-    endif()
-    list(APPEND ICEBERG_SYSTEM_DEPENDENCIES Parquet)
+    find_package(Parquet CONFIG REQUIRED)
+    list(APPEND ICEBERG_SYSTEM_DEPENDENCIES Arrow Parquet)
   endif()
 
   set(ICEBERG_SYSTEM_DEPENDENCIES
@@ -181,42 +242,6 @@ function(resolve_arrow_dependency)
       PARENT_SCOPE)
   set(ARROW_VENDORED
       ${ARROW_VENDORED}
-      PARENT_SCOPE)
-endfunction()
-
-# ----------------------------------------------------------------------
-# fmt (required by Apache Avro)
-#
-# We fetch fmt explicitly before avro-cpp to ensure a compatible version.
-# Avro-cpp bundles fmt 10.2.1 which has consteval bugs with newer compilers.
-
-function(resolve_fmt_dependency)
-  prepare_fetchcontent()
-
-  set(FMT_INSTALL OFF)
-
-  fetchcontent_declare(fmt
-                       ${FC_DECLARE_COMMON_OPTIONS}
-                       GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-                       GIT_TAG 12.1.0
-                       FIND_PACKAGE_ARGS
-                       NAMES
-                       fmt
-                       CONFIG)
-  fetchcontent_makeavailable(fmt)
-
-  if(fmt_SOURCE_DIR)
-    set(FMT_VENDORED TRUE)
-  else()
-    set(FMT_VENDORED FALSE)
-    list(APPEND ICEBERG_SYSTEM_DEPENDENCIES fmt)
-  endif()
-
-  set(ICEBERG_SYSTEM_DEPENDENCIES
-      ${ICEBERG_SYSTEM_DEPENDENCIES}
-      PARENT_SCOPE)
-  set(FMT_VENDORED
-      ${FMT_VENDORED}
       PARENT_SCOPE)
 endfunction()
 
@@ -258,7 +283,7 @@ function(resolve_avro_dependency)
     fetchcontent_declare(avro-cpp
                          ${FC_DECLARE_COMMON_OPTIONS}
                          GIT_REPOSITORY ${AVRO_GIT_REPOSITORY}
-                         GIT_TAG 11fb55500bed9fbe9af53b85112cd13887f0ce80
+                         GIT_TAG 997d50d312613e921598aaed30b082f9bcf9c6ea
                          SOURCE_SUBDIR
                          lang/c++
                          FIND_PACKAGE_ARGS
@@ -470,6 +495,61 @@ function(resolve_nlohmann_json_dependency)
 endfunction()
 
 # ----------------------------------------------------------------------
+# spdlog
+
+function(resolve_spdlog_dependency)
+  prepare_fetchcontent()
+
+  find_package(Threads REQUIRED)
+
+  set(SPDLOG_USE_STD_FORMAT
+      ON
+      CACHE BOOL "" FORCE)
+  set(SPDLOG_BUILD_PIC
+      ON
+      CACHE BOOL "" FORCE)
+
+  if(DEFINED ENV{ICEBERG_SPDLOG_URL})
+    set(SPDLOG_URL "$ENV{ICEBERG_SPDLOG_URL}")
+  else()
+    set(SPDLOG_URL "https://github.com/gabime/spdlog/archive/refs/tags/v1.15.3.tar.gz")
+  endif()
+
+  fetchcontent_declare(spdlog
+                       ${FC_DECLARE_COMMON_OPTIONS}
+                       URL ${SPDLOG_URL}
+                           FIND_PACKAGE_ARGS
+                           NAMES
+                           spdlog
+                           CONFIG)
+  fetchcontent_makeavailable(spdlog)
+
+  if(spdlog_SOURCE_DIR)
+    set_target_properties(spdlog PROPERTIES OUTPUT_NAME "iceberg_vendored_spdlog"
+                                            POSITION_INDEPENDENT_CODE ON)
+    target_link_libraries(spdlog INTERFACE Threads::Threads)
+    install(TARGETS spdlog
+            EXPORT iceberg_targets
+            RUNTIME DESTINATION "${ICEBERG_INSTALL_BINDIR}"
+            ARCHIVE DESTINATION "${ICEBERG_INSTALL_LIBDIR}"
+            LIBRARY DESTINATION "${ICEBERG_INSTALL_LIBDIR}")
+    set(SPDLOG_VENDORED TRUE)
+  else()
+    set(SPDLOG_VENDORED FALSE)
+    list(APPEND ICEBERG_SYSTEM_DEPENDENCIES spdlog)
+  endif()
+
+  list(APPEND ICEBERG_SYSTEM_DEPENDENCIES Threads)
+
+  set(ICEBERG_SYSTEM_DEPENDENCIES
+      ${ICEBERG_SYSTEM_DEPENDENCIES}
+      PARENT_SCOPE)
+  set(SPDLOG_VENDORED
+      ${SPDLOG_VENDORED}
+      PARENT_SCOPE)
+endfunction()
+
+# ----------------------------------------------------------------------
 # zlib
 
 function(resolve_zlib_dependency)
@@ -496,11 +576,16 @@ function(resolve_cpr_dependency)
   set(CPR_ENABLE_CURL_HTTP_ONLY ON)
   set(CPR_ENABLE_SSL ON)
   set(CPR_USE_SYSTEM_CURL ON)
+  set(CPR_USE_EXISTING_CURL_TARGET ON)
 
   if(DEFINED ENV{ICEBERG_CPR_URL})
     set(CPR_URL "$ENV{ICEBERG_CPR_URL}")
   else()
     set(CPR_URL "https://github.com/libcpr/cpr/archive/refs/tags/1.14.1.tar.gz")
+  endif()
+
+  if(NOT TARGET CURL::libcurl)
+    find_package(CURL REQUIRED)
   endif()
 
   fetchcontent_declare(cpr
@@ -545,6 +630,90 @@ function(resolve_cpr_dependency)
 endfunction()
 
 # ----------------------------------------------------------------------
+# SQL catalog database connectors (sqlpp23)
+#
+# The SQL catalog talks to the database through a semantic `CatalogStore`
+# interface (src/iceberg/catalog/sql/catalog_store.h). The built-in stores are
+# implemented on top of sqlpp23, a header-only, compile-time type-safe SQL
+# library. Each connector is opt-in and pulls in its native client library:
+#
+#   ICEBERG_SQL_SQLITE      -> sqlpp23::sqlite3      (SQLite::SQLite3)
+#   ICEBERG_SQL_POSTGRESQL  -> sqlpp23::postgresql   (PostgreSQL::PostgreSQL)
+#   ICEBERG_SQL_MYSQL       -> sqlpp23::mysql        (MySQL::MySQL)
+#
+# Users who inject their own `CatalogStore` do not need sqlpp23 or any connector.
+
+function(resolve_sql_catalog_dependencies)
+  if(NOT ICEBERG_SQL_SQLITE
+     AND NOT ICEBERG_SQL_POSTGRESQL
+     AND NOT ICEBERG_SQL_MYSQL)
+    message(STATUS "SQL catalog: no built-in connectors enabled")
+    return()
+  endif()
+
+  if(CMAKE_VERSION VERSION_LESS 3.28)
+    message(FATAL_ERROR "Built-in SQL catalog connectors require CMake >= 3.28; disable "
+                        "ICEBERG_SQL_SQLITE, ICEBERG_SQL_POSTGRESQL, and ICEBERG_SQL_MYSQL "
+                        "or use CMake >= 3.28")
+  endif()
+
+  prepare_fetchcontent()
+
+  # sqlpp23 requires C++23 and CMake >= 3.28.
+  set(CMAKE_CXX_STANDARD 23)
+  # Header-only consumption; do not scan for C++20 modules.
+  set(BUILD_WITH_MODULES OFF)
+  # Let sqlpp23 verify and locate the native client libraries for the connectors
+  # we enable, exposing the sqlpp23::<connector> targets.
+  set(BUILD_SQLITE3_CONNECTOR ${ICEBERG_SQL_SQLITE})
+  set(BUILD_POSTGRESQL_CONNECTOR ${ICEBERG_SQL_POSTGRESQL})
+  set(BUILD_MYSQL_CONNECTOR ${ICEBERG_SQL_MYSQL})
+
+  if(DEFINED ENV{ICEBERG_SQLPP23_URL})
+    set(SQLPP23_URL "$ENV{ICEBERG_SQLPP23_URL}")
+  else()
+    set(SQLPP23_URL "https://github.com/rbock/sqlpp23/archive/refs/tags/0.69.tar.gz")
+  endif()
+
+  fetchcontent_declare(sqlpp23
+                       ${FC_DECLARE_COMMON_OPTIONS}
+                       URL ${SQLPP23_URL}
+                           FIND_PACKAGE_ARGS
+                           NAMES
+                           Sqlpp23
+                           CONFIG)
+  fetchcontent_makeavailable(sqlpp23)
+
+  # sqlpp23 locates the native client libraries within its own subdirectory
+  # scope. Re-run find_package with GLOBAL so the imported targets are visible
+  # where the SQL catalog library is defined, and record them as downstream
+  # system dependencies for the installed interface.
+  if(ICEBERG_SQL_SQLITE)
+    find_package(SQLite3 REQUIRED GLOBAL)
+    list(APPEND ICEBERG_SYSTEM_DEPENDENCIES SQLite3)
+    message(STATUS "SQL catalog: SQLite connector enabled (sqlpp23::sqlite3)")
+  endif()
+  if(ICEBERG_SQL_POSTGRESQL)
+    find_package(PostgreSQL REQUIRED GLOBAL)
+    list(APPEND ICEBERG_SYSTEM_DEPENDENCIES PostgreSQL)
+    message(STATUS "SQL catalog: PostgreSQL connector enabled (sqlpp23::postgresql)")
+  endif()
+  if(ICEBERG_SQL_MYSQL)
+    # MySQL has no standard CMake module; reuse the one sqlpp23 ships.
+    if(sqlpp23_SOURCE_DIR)
+      list(APPEND CMAKE_MODULE_PATH "${sqlpp23_SOURCE_DIR}/cmake/modules")
+    endif()
+    find_package(MySQL REQUIRED GLOBAL)
+    list(APPEND ICEBERG_SYSTEM_DEPENDENCIES MySQL)
+    message(STATUS "SQL catalog: MySQL connector enabled (sqlpp23::mysql)")
+  endif()
+
+  set(ICEBERG_SYSTEM_DEPENDENCIES
+      ${ICEBERG_SYSTEM_DEPENDENCIES}
+      PARENT_SCOPE)
+endfunction()
+
+# ----------------------------------------------------------------------
 # Zstd
 
 function(resolve_zstd_dependency)
@@ -562,40 +731,61 @@ resolve_zlib_dependency()
 resolve_nanoarrow_dependency()
 resolve_croaring_dependency()
 resolve_nlohmann_json_dependency()
+resolve_spdlog_dependency()
+
+if(ICEBERG_S3 OR ICEBERG_SIGV4)
+  if(ICEBERG_SIGV4 AND NOT ICEBERG_BUILD_REST)
+    message(FATAL_ERROR "ICEBERG_SIGV4 requires ICEBERG_BUILD_REST to be ON")
+  endif()
+  resolve_aws_sdk_dependency()
+endif()
 
 if(ICEBERG_BUILD_BUNDLE)
   resolve_arrow_dependency()
-  resolve_fmt_dependency()
   resolve_avro_dependency()
   resolve_zstd_dependency()
 endif()
 
-# ----------------------------------------------------------------------
-# aws-crt-cpp (optional, used by REST catalog SigV4 AuthManager).
-# If not found, the REST client still builds and SigV4 returns NotImplemented
-# at runtime. Install via Conan or vcpkg to enable AWS Glue integration.
+if(ICEBERG_BUILD_REST)
+  resolve_cpr_dependency()
+endif()
 
-function(resolve_aws_crt_cpp_dependency)
-  find_package(aws-crt-cpp CONFIG QUIET)
-  if(aws-crt-cpp_FOUND)
-    list(APPEND ICEBERG_SYSTEM_DEPENDENCIES aws-crt-cpp)
-    set(ICEBERG_REST_HAVE_SIGV4
-        TRUE
-        PARENT_SCOPE)
-    message(STATUS "Found aws-crt-cpp (${aws-crt-cpp_VERSION_STRING}); enabling REST "
-                   "SigV4 auth")
+if(ICEBERG_BUILD_SQL_CATALOG)
+  resolve_sql_catalog_dependencies()
+endif()
+
+# ----------------------------------------------------------------------
+# Thrift (Hive catalog)
+#
+# Provide a `thrift::thrift` target for iceberg_hive's generated Hive Metastore
+# bindings, either bundled (from Arrow's build) or from a system install. Must
+# run after resolve_arrow_dependency() so the bundled `thrift` target exists.
+
+function(resolve_thrift_dependency)
+  if(NOT ICEBERG_BUILD_HIVE)
+    return()
+  endif()
+  if(ICEBERG_THRIFT_BUNDLED)
+    # Arrow's bundled build creates the Thrift C++ runtime as a `thrift` target
+    # scoped to its FetchContent directory, where iceberg_hive cannot see it.
+    # Promote it to a global `thrift::thrift` alias so iceberg_hive can link the
+    # generated Hive Metastore bindings against it.
+    if(TARGET thrift AND NOT TARGET thrift::thrift)
+      add_library(thrift::thrift INTERFACE IMPORTED GLOBAL)
+      target_link_libraries(thrift::thrift INTERFACE thrift)
+    endif()
+  else()
+    # System Thrift, located by cmake_modules/FindThriftAlt.cmake (MODULE mode),
+    # which provides the `thrift::thrift` target iceberg_hive expects. Record it
+    # as a system dependency so downstream find_package(Iceberg) re-finds it.
+    find_package(ThriftAlt MODULE REQUIRED GLOBAL)
+    list(APPEND ICEBERG_SYSTEM_DEPENDENCIES ThriftAlt)
     set(ICEBERG_SYSTEM_DEPENDENCIES
         ${ICEBERG_SYSTEM_DEPENDENCIES}
         PARENT_SCOPE)
-  else()
-    set(ICEBERG_REST_HAVE_SIGV4
-        FALSE
-        PARENT_SCOPE)
-    message(STATUS "aws-crt-cpp not found; REST SigV4 auth will return NotImplemented")
   endif()
 endfunction()
 
-if(ICEBERG_BUILD_REST)
-  resolve_cpr_dependency()
-  resolve_aws_crt_cpp_dependency()
+if(ICEBERG_BUILD_HIVE)
+  resolve_thrift_dependency()
 endif()

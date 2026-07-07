@@ -22,6 +22,7 @@
 #include <format>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -50,6 +51,18 @@ TEST(TransformTest, Transform) {
   ASSERT_TRUE(identity_transform);
 }
 
+TEST(TransformTest, IdentityDoesNotSupportV3Types) {
+  const auto transform = Transform::Identity();
+  const std::vector<std::shared_ptr<Type>> unsupported_types = {
+      iceberg::variant(), iceberg::geometry(), iceberg::geography()};
+
+  for (const auto& type : unsupported_types) {
+    EXPECT_FALSE(transform->CanTransform(*type));
+    EXPECT_THAT(transform->Bind(type),
+                HasErrorMessage("is not a valid input type for identity transform"));
+  }
+}
+
 TEST(TransformFunctionTest, CreateBucketTransform) {
   constexpr int32_t bucket_count = 8;
   auto transform = Transform::Bucket(bucket_count);
@@ -69,6 +82,56 @@ TEST(TransformFunctionTest, CreateTruncateTransform) {
 
   auto transformPtr = transform->Bind(iceberg::string());
   EXPECT_EQ(transformPtr.value()->transform_type(), TransformType::kTruncate);
+}
+
+TEST(TransformFunctionTest, CreateYearTransform) {
+  auto transform = Transform::Year();
+  EXPECT_EQ("year", transform->ToString());
+  EXPECT_EQ("year", std::format("{}", *transform));
+
+  auto transformPtr = transform->Bind(iceberg::timestamp());
+  ASSERT_TRUE(transformPtr);
+  EXPECT_EQ(transformPtr.value()->transform_type(), TransformType::kYear);
+}
+
+TEST(TransformFunctionTest, CreateMonthTransform) {
+  auto transform = Transform::Month();
+  EXPECT_EQ("month", transform->ToString());
+  EXPECT_EQ("month", std::format("{}", *transform));
+
+  auto transformPtr = transform->Bind(iceberg::timestamp());
+  ASSERT_TRUE(transformPtr);
+  EXPECT_EQ(transformPtr.value()->transform_type(), TransformType::kMonth);
+}
+
+TEST(TransformFunctionTest, CreateDayTransform) {
+  auto transform = Transform::Day();
+  EXPECT_EQ("day", transform->ToString());
+  EXPECT_EQ("day", std::format("{}", *transform));
+
+  auto transformPtr = transform->Bind(iceberg::timestamp_tz());
+  ASSERT_TRUE(transformPtr);
+  EXPECT_EQ(transformPtr.value()->transform_type(), TransformType::kDay);
+}
+
+TEST(TransformFunctionTest, CreateHourTransform) {
+  auto transform = Transform::Hour();
+  EXPECT_EQ("hour", transform->ToString());
+  EXPECT_EQ("hour", std::format("{}", *transform));
+
+  auto transformPtr = transform->Bind(iceberg::timestamp());
+  ASSERT_TRUE(transformPtr);
+  EXPECT_EQ(transformPtr.value()->transform_type(), TransformType::kHour);
+}
+
+TEST(TransformFunctionTest, CreateVoidTransform) {
+  auto transform = Transform::Void();
+  EXPECT_EQ("void", transform->ToString());
+  EXPECT_EQ("void", std::format("{}", *transform));
+
+  auto transformPtr = transform->Bind(iceberg::int32());
+  ASSERT_TRUE(transformPtr);
+  EXPECT_EQ(transformPtr.value()->transform_type(), TransformType::kVoid);
 }
 
 TEST(TransformFromStringTest, PositiveCases) {
@@ -159,12 +222,16 @@ TEST(TransformResultTypeTest, PositiveCases) {
     ASSERT_TRUE(result.has_value()) << "Failed to parse: " << c.str;
 
     const auto& transform = result.value();
-    const auto transformPtr = transform->Bind(c.source_type);
-    ASSERT_TRUE(transformPtr.has_value()) << "Failed to bind: " << c.str;
-
-    auto result_type = transformPtr.value()->ResultType();
+    auto result_type = transform->ResultType(c.source_type);
+    ASSERT_NE(result_type, nullptr) << "Missing result type for: " << c.str;
     EXPECT_EQ(result_type->type_id(), c.expected_result_type->type_id())
         << "Unexpected result type for: " << c.str;
+
+    const auto transform_func = transform->Bind(c.source_type);
+    ASSERT_TRUE(transform_func.has_value()) << "Failed to bind: " << c.str;
+    EXPECT_EQ(transform_func.value()->ResultType()->type_id(),
+              c.expected_result_type->type_id())
+        << "Unexpected bound result type for: " << c.str;
   }
 }
 

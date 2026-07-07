@@ -25,7 +25,7 @@
 #include <arrow/record_batch.h>
 #include <gtest/gtest.h>
 
-#include "iceberg/arrow/arrow_file_io.h"
+#include "iceberg/arrow/arrow_io_util.h"
 #include "iceberg/avro/avro_register.h"
 #include "iceberg/file_reader.h"
 #include "iceberg/file_writer.h"
@@ -326,6 +326,15 @@ TEST_F(TestManifestListVersions, TestV3WriteMixedRowIdAssignment) {
   EXPECT_EQ(manifests[1].first_row_id, kTestManifest.first_row_id);
   EXPECT_EQ(manifests[2].first_row_id,
             std::make_optional(kSnapshotFirstRowId + kAddedRows + kExistingRows));
+}
+
+TEST_F(TestManifestListVersions, TestV3DeleteRowIdNull) {
+  const auto manifest_list_path =
+      WriteManifestList(/*format_version=*/3, kSnapshotFirstRowId, {kDeleteManifest});
+
+  auto manifest = ReadManifestList(manifest_list_path);
+  EXPECT_EQ(manifest.content, ManifestContent::kDeletes);
+  EXPECT_FALSE(manifest.first_row_id.has_value());
 }
 
 TEST_F(TestManifestListVersions, TestV1ForwardCompatibility) {

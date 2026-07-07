@@ -33,6 +33,7 @@
 #include "iceberg/util/json_util_internal.h"
 #include "iceberg/util/macros.h"
 #include "iceberg/util/string_util.h"
+#include "iceberg/util/temporal_util.h"
 #include "iceberg/util/transform_util.h"
 
 namespace iceberg {
@@ -272,6 +273,11 @@ Result<nlohmann::json> ToJson(const Literal& literal) {
     case TypeId::kTimestampTz:
       return nlohmann::json(
           TransformUtil::HumanTimestampWithZone(std::get<int64_t>(value)));
+    case TypeId::kTimestampNs:
+      return nlohmann::json(TransformUtil::HumanTimestampNs(std::get<int64_t>(value)));
+    case TypeId::kTimestampTzNs:
+      return nlohmann::json(
+          TransformUtil::HumanTimestampNsWithZone(std::get<int64_t>(value)));
     case TypeId::kFloat:
       return nlohmann::json(std::get<float>(value));
     case TypeId::kDouble:
@@ -358,7 +364,7 @@ Result<Literal> LiteralFromJson(const nlohmann::json& json, const Type* type) {
         return JsonParseError("Cannot parse {} as a date value", SafeDumpJson(json));
       }
       ICEBERG_ASSIGN_OR_RAISE(auto days,
-                              TransformUtil::ParseDay(json.get<std::string>()));
+                              TemporalUtils::ParseDay(json.get<std::string>()));
       return Literal::Date(days);
     }
 
@@ -367,7 +373,7 @@ Result<Literal> LiteralFromJson(const nlohmann::json& json, const Type* type) {
         return JsonParseError("Cannot parse {} as a time value", SafeDumpJson(json));
       }
       ICEBERG_ASSIGN_OR_RAISE(auto micros,
-                              TransformUtil::ParseTime(json.get<std::string>()));
+                              TemporalUtils::ParseTime(json.get<std::string>()));
       return Literal::Time(micros);
     }
 
@@ -376,7 +382,7 @@ Result<Literal> LiteralFromJson(const nlohmann::json& json, const Type* type) {
         return JsonParseError("Cannot parse {} as a timestamp value", SafeDumpJson(json));
       }
       ICEBERG_ASSIGN_OR_RAISE(auto micros,
-                              TransformUtil::ParseTimestamp(json.get<std::string>()));
+                              TemporalUtils::ParseTimestamp(json.get<std::string>()));
       return Literal::Timestamp(micros);
     }
 
@@ -386,8 +392,28 @@ Result<Literal> LiteralFromJson(const nlohmann::json& json, const Type* type) {
                               SafeDumpJson(json));
       }
       ICEBERG_ASSIGN_OR_RAISE(
-          auto micros, TransformUtil::ParseTimestampWithZone(json.get<std::string>()));
+          auto micros, TemporalUtils::ParseTimestampWithZone(json.get<std::string>()));
       return Literal::TimestampTz(micros);
+    }
+
+    case TypeId::kTimestampNs: {
+      if (!json.is_string()) [[unlikely]] {
+        return JsonParseError("Cannot parse {} as a timestamp_ns value",
+                              SafeDumpJson(json));
+      }
+      ICEBERG_ASSIGN_OR_RAISE(auto nanos,
+                              TemporalUtils::ParseTimestampNs(json.get<std::string>()));
+      return Literal::TimestampNs(nanos);
+    }
+
+    case TypeId::kTimestampTzNs: {
+      if (!json.is_string()) [[unlikely]] {
+        return JsonParseError("Cannot parse {} as a timestamptz_ns value",
+                              SafeDumpJson(json));
+      }
+      ICEBERG_ASSIGN_OR_RAISE(
+          auto nanos, TemporalUtils::ParseTimestampNsWithZone(json.get<std::string>()));
+      return Literal::TimestampTzNs(nanos);
     }
 
     case TypeId::kUuid: {

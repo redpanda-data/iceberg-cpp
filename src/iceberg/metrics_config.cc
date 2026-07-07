@@ -19,6 +19,7 @@
 
 #include "iceberg/metrics_config.h"
 
+#include <limits>
 #include <string>
 #include <unordered_map>
 
@@ -100,6 +101,19 @@ Result<MetricsMode> MetricsMode::FromString(std::string_view mode) {
   return InvalidArgument("Invalid metrics mode: {}", mode);
 }
 
+int32_t MetricsMode::TruncateLength() const {
+  switch (kind) {
+    case Kind::kNone:
+    case Kind::kCounts:
+      return 0;
+    case Kind::kTruncate:
+      return std::get<int32_t>(length);
+    case Kind::kFull:
+      return std::numeric_limits<int32_t>::max();
+  }
+  return 0;
+}
+
 MetricsConfig::MetricsConfig(ColumnModeMap column_modes, MetricsMode default_mode)
     : column_modes_(std::move(column_modes)), default_mode_(default_mode) {}
 
@@ -111,13 +125,20 @@ const std::shared_ptr<MetricsConfig>& MetricsConfig::Default() {
 
 Result<std::shared_ptr<MetricsConfig>> MetricsConfig::Make(const Table& table) {
   ICEBERG_ASSIGN_OR_RAISE(auto schema, table.schema());
-  auto sort_order = table.sort_order();
-  return MakeInternal(table.properties(), *schema,
-                      *sort_order.value_or(SortOrder::Unsorted()));
+  auto order = table.sort_order().value_or(SortOrder::Unsorted());
+  return MakeInternal(table.properties(), schema.get(), order.get());
+}
+
+Result<std::shared_ptr<MetricsConfig>> MetricsConfig::Make(
+    std::unordered_map<std::string, std::string> properties) {
+  // Create a minimal TableProperties wrapper for the properties
+  TableProperties props = TableProperties::FromMap(std::move(properties));
+
+  return MakeInternal(props, /*schema=*/nullptr, /*order=*/nullptr);
 }
 
 Result<std::shared_ptr<MetricsConfig>> MetricsConfig::MakeInternal(
-    const TableProperties& props, const Schema& schema, const SortOrder& order) {
+    const TableProperties& props, const Schema* schema, const SortOrder* order) {
   ColumnModeMap column_modes;
 
   MetricsMode default_mode = kDefaultMetricsMode;
@@ -126,16 +147,16 @@ Result<std::shared_ptr<MetricsConfig>> MetricsConfig::MakeInternal(
         props.Get(TableProperties::kDefaultWriteMetricsMode);
     ICEBERG_ASSIGN_OR_RAISE(default_mode,
                             ParseMode(configured_metrics_mode, kDefaultMetricsMode));
-  } else {
+  } else if (schema != nullptr) {
     int32_t max_inferred_columns = MaxInferredColumns(props);
     GetProjectedIdsVisitor visitor(/*include_struct_ids=*/true);
-    ICEBERG_RETURN_UNEXPECTED(visitor.Visit(schema));
+    ICEBERG_RETURN_UNEXPECTED(visitor.Visit(*schema));
     auto projected_columns = static_cast<int32_t>(visitor.Finish().size());
     if (max_inferred_columns < projected_columns) {
       ICEBERG_ASSIGN_OR_RAISE(auto limit_field_ids,
-                              LimitFieldIds(schema, max_inferred_columns));
+                              LimitFieldIds(*schema, max_inferred_columns));
       for (auto id : limit_field_ids) {
-        ICEBERG_ASSIGN_OR_RAISE(auto column_name, schema.FindColumnNameById(id));
+        ICEBERG_ASSIGN_OR_RAISE(auto column_name, schema->FindColumnNameById(id));
         ICEBERG_CHECK(column_name.has_value(), "Field id {} not found in schema", id);
         column_modes[std::string(column_name.value())] = kDefaultMetricsMode;
       }
@@ -145,10 +166,12 @@ Result<std::shared_ptr<MetricsConfig>> MetricsConfig::MakeInternal(
   }
 
   // First set sorted column with sorted column default (can be overridden by user)
-  auto sorted_col_default_mode = SortedColumnDefaultMode(default_mode);
-  auto sorted_columns = SortOrder::OrderPreservingSortedColumns(schema, order);
-  for (const auto& sorted_column : sorted_columns) {
-    column_modes[std::string(sorted_column)] = sorted_col_default_mode;
+  if (schema != nullptr && order != nullptr) {
+    auto sorted_col_default_mode = SortedColumnDefaultMode(default_mode);
+    auto sorted_columns = SortOrder::OrderPreservingSortedColumns(*schema, *order);
+    for (const auto& sorted_column : sorted_columns) {
+      column_modes[std::string(sorted_column)] = sorted_col_default_mode;
+    }
   }
 
   // Handle user overrides of defaults
@@ -174,6 +197,8 @@ Result<std::unordered_set<int32_t>> MetricsConfig::LimitFieldIds(const Schema& s
     Status Visit(const Type& type) {
       if (type.is_nested()) {
         return VisitNested(internal::checked_cast<const NestedType&>(type));
+      } else if (type.is_variant()) {
+        return {};
       } else {
         return VisitPrimitive(internal::checked_cast<const PrimitiveType&>(type));
       }
@@ -184,8 +209,7 @@ Result<std::unordered_set<int32_t>> MetricsConfig::LimitFieldIds(const Schema& s
         if (!ShouldContinue()) {
           break;
         }
-        // TODO(zhuo.wang): variant type should also be handled here
-        if (field.type()->is_primitive()) {
+        if (!field.type()->is_nested()) {
           ids_.insert(field.field_id());
         }
       }

@@ -17,18 +17,28 @@
  * under the License.
  */
 
+#include <array>
+#include <initializer_list>
+#include <optional>
 #include <sstream>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include <arrow/array.h>
 #include <arrow/array/array_base.h>
+#include <arrow/array/builder_binary.h>
+#include <arrow/array/builder_primitive.h>
 #include <arrow/c/bridge.h>
+#include <arrow/extension/uuid.h>
+#include <arrow/filesystem/filesystem.h>
 #include <arrow/json/from_string.h>
 #include <avro/DataFile.hh>
 #include <avro/Generic.hh>
 #include <gtest/gtest.h>
 
-#include "iceberg/arrow/arrow_fs_file_io_internal.h"
+#include "iceberg/arrow/arrow_io_internal.h"
+#include "iceberg/avro/avro_constants.h"
 #include "iceberg/avro/avro_register.h"
 #include "iceberg/avro/avro_stream_internal.h"
 #include "iceberg/avro/avro_writer.h"
@@ -37,16 +47,84 @@
 #include "iceberg/schema.h"
 #include "iceberg/schema_internal.h"
 #include "iceberg/test/matchers.h"
+#include "iceberg/test/std_io.h"
+#include "iceberg/test/temp_file_test_base.h"
 #include "iceberg/type.h"
 #include "iceberg/util/checked_cast.h"
+#include "iceberg/util/uuid.h"
 
 namespace iceberg::avro {
 
-class AvroReaderTest : public ::testing::Test {
+namespace {
+
+::avro::NodePtr UnwrapOptional(const ::avro::NodePtr& node) {
+  if (node->type() != ::avro::AVRO_UNION) {
+    return node;
+  }
+
+  for (size_t i = 0; i < node->leaves(); ++i) {
+    if (node->leafAt(i)->type() != ::avro::AVRO_NULL) {
+      return node->leafAt(i);
+    }
+  }
+  return node;
+}
+
+std::optional<int32_t> FieldIdAt(const ::avro::NodePtr& node, size_t index) {
+  if (index >= node->customAttributes()) {
+    return std::nullopt;
+  }
+
+  auto field_id = node->customAttributesAt(index).getAttribute(std::string(kFieldIdProp));
+  if (!field_id.has_value()) {
+    return std::nullopt;
+  }
+  return std::stoi(field_id.value());
+}
+
+constexpr std::array<uint8_t, Uuid::kLength> kUuidBytes1 = {
+    0x12, 0x3e, 0x45, 0x67, 0xe8, 0x9b, 0x12, 0xd3,
+    0xa4, 0x56, 0x42, 0x66, 0x14, 0x17, 0x40, 0x00};
+constexpr std::array<uint8_t, Uuid::kLength> kUuidBytes2 = {
+    0xf7, 0x9c, 0x3e, 0x09, 0x67, 0x7c, 0x4b, 0xbd,
+    0xa4, 0x79, 0x3f, 0x34, 0x9c, 0xb7, 0x85, 0xe7};
+
+std::shared_ptr<::arrow::Array> MakeUuidArray(
+    std::initializer_list<const std::array<uint8_t, Uuid::kLength>*> values) {
+  ::arrow::FixedSizeBinaryBuilder uuid_storage_builder(
+      ::arrow::fixed_size_binary(Uuid::kLength));
+  for (const auto* value : values) {
+    EXPECT_TRUE(uuid_storage_builder.Append(value->data()).ok());
+  }
+  auto uuid_storage = uuid_storage_builder.Finish().ValueOrDie();
+  return ::arrow::ExtensionType::WrapArray(::arrow::extension::uuid(), uuid_storage);
+}
+
+std::shared_ptr<::arrow::Array> MakeInt32Array(std::initializer_list<int32_t> values) {
+  ::arrow::Int32Builder builder;
+  for (auto value : values) {
+    EXPECT_TRUE(builder.Append(value).ok());
+  }
+  return builder.Finish().ValueOrDie();
+}
+
+std::shared_ptr<::arrow::Array> MakeStringArray(
+    std::initializer_list<std::string_view> values) {
+  ::arrow::StringBuilder builder;
+  for (auto value : values) {
+    EXPECT_TRUE(builder.Append(value).ok());
+  }
+  return builder.Finish().ValueOrDie();
+}
+
+}  // namespace
+
+class AvroReaderTest : public TempFileTestBase {
  protected:
   static void SetUpTestSuite() { RegisterAll(); }
 
   void SetUp() override {
+    TempFileTestBase::SetUp();
     file_io_ = arrow::ArrowFileSystemFileIO::MakeMockFileIO();
     temp_avro_file_ = "avro_reader_test.avro";
   }
@@ -185,6 +263,16 @@ TEST_F(AvroReaderTest, ReadTwoFields) {
   ASSERT_NO_FATAL_FAILURE(
       VerifyNextBatch(*reader, R"([[1, "Alice"], [2, "Bob"], [3, "Charlie"]])"));
   ASSERT_NO_FATAL_FAILURE(VerifyExhausted(*reader));
+}
+
+TEST_F(AvroReaderTest, RoundTripWithGenericFileIO) {
+  file_io_ = std::make_shared<iceberg::test::StdFileIO>();
+  temp_avro_file_ = CreateNewTempFilePathWithSuffix(".avro");
+  auto schema = std::make_shared<Schema>(std::vector<SchemaField>{
+      SchemaField::MakeRequired(1, "id", std::make_shared<IntType>()),
+      SchemaField::MakeOptional(2, "name", std::make_shared<StringType>())});
+
+  ASSERT_NO_FATAL_FAILURE(WriteAndVerify(schema, R"([[1, "Foo"], [2, "Bar"]])"));
 }
 
 TEST_F(AvroReaderTest, ReadReorderedFieldsWithNulls) {
@@ -726,6 +814,49 @@ class AvroWriterTest : public ::testing::Test,
     ASSERT_NO_FATAL_FAILURE(VerifyExhausted(*reader));
   }
 
+  ::avro::ValidSchema PhysicalAvroSchema() {
+    auto& mock_io = internal::checked_cast<arrow::ArrowFileSystemFileIO&>(*file_io_);
+    auto input = mock_io.fs()->OpenInputFile(temp_avro_file_).ValueOrDie();
+    auto input_stream = std::make_unique<AvroInputStream>(std::move(input), 1024 * 1024);
+    ::avro::DataFileReader<::avro::GenericDatum> avro_reader(std::move(input_stream));
+    return avro_reader.dataSchema();
+  }
+
+  void WriteArrowArrayAndVerify(std::shared_ptr<Schema> schema,
+                                const std::shared_ptr<::arrow::Array>& array) {
+    ArrowArray arrow_array;
+    ASSERT_TRUE(::arrow::ExportArray(*array, &arrow_array).ok());
+
+    WriterProperties writer_properties;
+    writer_properties.Set(WriterProperties::kAvroSkipDatum, skip_datum_);
+
+    ICEBERG_UNWRAP_OR_FAIL(writer_, WriterFactoryRegistry::Open(
+                                        FileFormatType::kAvro,
+                                        {.path = temp_avro_file_,
+                                         .schema = schema,
+                                         .io = file_io_,
+                                         .properties = std::move(writer_properties)}));
+    ASSERT_THAT(writer_->Write(&arrow_array), IsOk());
+    ASSERT_THAT(writer_->Close(), IsOk());
+
+    ICEBERG_UNWRAP_OR_FAIL(auto written_length, writer_->length());
+    ICEBERG_UNWRAP_OR_FAIL(
+        auto reader,
+        ReaderFactoryRegistry::Open(FileFormatType::kAvro, {.path = temp_avro_file_,
+                                                            .length = written_length,
+                                                            .io = file_io_,
+                                                            .projection = schema}));
+    ICEBERG_UNWRAP_OR_FAIL(auto data, reader->Next());
+    ASSERT_TRUE(data.has_value());
+
+    ICEBERG_UNWRAP_OR_FAIL(auto arrow_c_schema, reader->Schema());
+    auto read_array = ::arrow::ImportArray(&data.value(), &arrow_c_schema).ValueOrDie();
+    ASSERT_TRUE(read_array->Equals(*array)) << "actual:\n"
+                                            << read_array->ToString() << "\nexpected:\n"
+                                            << array->ToString();
+    ASSERT_NO_FATAL_FAILURE(VerifyExhausted(*reader));
+  }
+
   std::shared_ptr<FileIO> file_io_;
   std::string temp_avro_file_;
   bool skip_datum_{true};
@@ -749,6 +880,135 @@ TEST_P(AvroWriterTest, WritePrimitiveTypes) {
 
   WriteAvroFile(schema, test_data);
   VerifyWrittenData(test_data);
+}
+
+TEST_P(AvroWriterTest, WriteUuidType) {
+  auto schema = std::make_shared<iceberg::Schema>(std::vector<SchemaField>{
+      SchemaField::MakeRequired(1, "uuid_col", iceberg::uuid())});
+
+  auto uuid_array = MakeUuidArray({&kUuidBytes1, &kUuidBytes2});
+  auto array =
+      ::arrow::StructArray::Make(
+          {uuid_array},
+          {::arrow::field("uuid_col", ::arrow::extension::uuid(), /*nullable=*/false)})
+          .ValueOrDie();
+
+  ArrowArray arrow_array;
+  ASSERT_TRUE(::arrow::ExportArray(*array, &arrow_array).ok());
+
+  WriterProperties writer_properties;
+  writer_properties.Set(WriterProperties::kAvroSkipDatum, skip_datum_);
+
+  ICEBERG_UNWRAP_OR_FAIL(
+      writer_, WriterFactoryRegistry::Open(FileFormatType::kAvro,
+                                           {.path = temp_avro_file_,
+                                            .schema = schema,
+                                            .io = file_io_,
+                                            .properties = std::move(writer_properties)}));
+  ASSERT_THAT(writer_->Write(&arrow_array), IsOk());
+  ASSERT_THAT(writer_->Close(), IsOk());
+
+  auto avro_schema = PhysicalAvroSchema();
+  auto root = avro_schema.root();
+  ASSERT_EQ(root->type(), ::avro::AVRO_RECORD);
+  ASSERT_EQ(root->leaves(), 1);
+  auto uuid_node = root->leafAt(0);
+  EXPECT_EQ(uuid_node->type(), ::avro::AVRO_FIXED);
+  EXPECT_EQ(uuid_node->logicalType().type(), ::avro::LogicalType::UUID);
+  EXPECT_EQ(uuid_node->fixedSize(), Uuid::kLength);
+
+  ICEBERG_UNWRAP_OR_FAIL(auto written_length, writer_->length());
+  ICEBERG_UNWRAP_OR_FAIL(
+      auto reader,
+      ReaderFactoryRegistry::Open(FileFormatType::kAvro, {.path = temp_avro_file_,
+                                                          .length = written_length,
+                                                          .io = file_io_,
+                                                          .projection = schema}));
+  ICEBERG_UNWRAP_OR_FAIL(auto data, reader->Next());
+  ASSERT_TRUE(data.has_value());
+
+  ICEBERG_UNWRAP_OR_FAIL(auto arrow_c_schema, reader->Schema());
+  auto read_array = ::arrow::ImportArray(&data.value(), &arrow_c_schema).ValueOrDie();
+  ASSERT_TRUE(read_array->Equals(*array)) << "actual:\n"
+                                          << read_array->ToString() << "\nexpected:\n"
+                                          << array->ToString();
+  ASSERT_NO_FATAL_FAILURE(VerifyExhausted(*reader));
+}
+
+TEST_P(AvroWriterTest, WriteUuidListType) {
+  auto schema = std::make_shared<iceberg::Schema>(std::vector<SchemaField>{
+      SchemaField::MakeRequired(1, "uuid_list",
+                                std::make_shared<ListType>(SchemaField::MakeRequired(
+                                    2, ListType::kElementName, iceberg::uuid())))});
+
+  auto list_values = MakeUuidArray({&kUuidBytes1, &kUuidBytes2, &kUuidBytes1});
+  auto list_offsets = MakeInt32Array({0, 2, 3});
+  auto list_type = ::arrow::list(::arrow::field(std::string(ListType::kElementName),
+                                                ::arrow::extension::uuid(),
+                                                /*nullable=*/false));
+  auto list_array =
+      ::arrow::ListArray::FromArrays(list_type, *list_offsets, *list_values).ValueOrDie();
+
+  auto array =
+      ::arrow::StructArray::Make(
+          {list_array}, {::arrow::field("uuid_list", list_type, /*nullable=*/false)})
+          .ValueOrDie();
+
+  ASSERT_NO_FATAL_FAILURE(WriteArrowArrayAndVerify(schema, array));
+}
+
+TEST_P(AvroWriterTest, WriteUuidMapType) {
+  auto schema = std::make_shared<iceberg::Schema>(
+      std::vector<SchemaField>{SchemaField::MakeRequired(
+          1, "uuid_map",
+          std::make_shared<MapType>(
+              SchemaField::MakeRequired(2, MapType::kKeyName, iceberg::string()),
+              SchemaField::MakeRequired(3, MapType::kValueName, iceberg::uuid())))});
+
+  auto map_offsets = MakeInt32Array({0, 2, 3});
+  auto map_keys = MakeStringArray({"first", "second", "only"});
+  auto map_items = MakeUuidArray({&kUuidBytes1, &kUuidBytes2, &kUuidBytes1});
+  auto map_type =
+      ::arrow::map(::arrow::utf8(), ::arrow::field(std::string(MapType::kValueName),
+                                                   ::arrow::extension::uuid(),
+                                                   /*nullable=*/false));
+  auto map_array =
+      ::arrow::MapArray::FromArrays(map_type, map_offsets, map_keys, map_items)
+          .ValueOrDie();
+
+  auto array =
+      ::arrow::StructArray::Make(
+          {map_array}, {::arrow::field("uuid_map", map_type, /*nullable=*/false)})
+          .ValueOrDie();
+
+  ASSERT_NO_FATAL_FAILURE(WriteArrowArrayAndVerify(schema, array));
+}
+
+TEST_P(AvroWriterTest, WriteUuidMapKeyType) {
+  auto schema = std::make_shared<iceberg::Schema>(
+      std::vector<SchemaField>{SchemaField::MakeRequired(
+          1, "uuid_key_map",
+          std::make_shared<MapType>(
+              SchemaField::MakeRequired(2, MapType::kKeyName, iceberg::uuid()),
+              SchemaField::MakeRequired(3, MapType::kValueName, iceberg::string())))});
+
+  auto map_offsets = MakeInt32Array({0, 2, 3});
+  auto map_keys = MakeUuidArray({&kUuidBytes1, &kUuidBytes2, &kUuidBytes1});
+  auto map_items = MakeStringArray({"first", "second", "only"});
+  auto map_type =
+      ::arrow::map(::arrow::extension::uuid(),
+                   ::arrow::field(std::string(MapType::kValueName), ::arrow::utf8(),
+                                  /*nullable=*/false));
+  auto map_array =
+      ::arrow::MapArray::FromArrays(map_type, map_offsets, map_keys, map_items)
+          .ValueOrDie();
+
+  auto array =
+      ::arrow::StructArray::Make(
+          {map_array}, {::arrow::field("uuid_key_map", map_type, /*nullable=*/false)})
+          .ValueOrDie();
+
+  ASSERT_NO_FATAL_FAILURE(WriteArrowArrayAndVerify(schema, array));
 }
 
 TEST_P(AvroWriterTest, WriteTemporalTypes) {
@@ -873,6 +1133,148 @@ TEST_P(AvroWriterTest, WriteOptionalFields) {
   ])";
 
   WriteAvroFile(schema, test_data);
+  VerifyWrittenData(test_data);
+}
+
+TEST_P(AvroWriterTest, WritesUnknownFieldsAsAvroNull) {
+  auto schema = std::make_shared<iceberg::Schema>(std::vector<SchemaField>{
+      SchemaField::MakeOptional(1, "id", int32()),
+      SchemaField::MakeOptional(2, "mystery", unknown()),
+      SchemaField::MakeOptional(3, "profile",
+                                std::make_shared<StructType>(std::vector<SchemaField>{
+                                    SchemaField::MakeOptional(4, "name", string()),
+                                    SchemaField::MakeOptional(5, "secret", unknown()),
+                                })),
+  });
+
+  std::string test_data = R"([
+    [1, null, {"name": "Person0", "secret": null}],
+    [2, null, {"name": "Person1", "secret": null}]
+  ])";
+
+  WriteAvroFile(schema, test_data);
+
+  auto avro_schema = PhysicalAvroSchema();
+  auto root = avro_schema.root();
+  ASSERT_EQ(root->type(), ::avro::AVRO_RECORD);
+  // Unknown fields are written as AVRO_NULL, not pruned.
+  ASSERT_EQ(root->leaves(), 3);
+  EXPECT_EQ(root->nameAt(0), "id");
+  EXPECT_EQ(FieldIdAt(root, 0), std::make_optional(1));
+  EXPECT_EQ(root->nameAt(1), "mystery");
+  EXPECT_EQ(root->leafAt(1)->type(), ::avro::AVRO_NULL);
+  EXPECT_EQ(FieldIdAt(root, 1), std::make_optional(2));
+  EXPECT_EQ(root->nameAt(2), "profile");
+  EXPECT_EQ(FieldIdAt(root, 2), std::make_optional(3));
+
+  auto profile = UnwrapOptional(root->leafAt(2));
+  ASSERT_EQ(profile->type(), ::avro::AVRO_RECORD);
+  ASSERT_EQ(profile->leaves(), 2);
+  EXPECT_EQ(profile->nameAt(0), "name");
+  EXPECT_EQ(FieldIdAt(profile, 0), std::make_optional(4));
+  EXPECT_EQ(profile->nameAt(1), "secret");
+  EXPECT_EQ(profile->leafAt(1)->type(), ::avro::AVRO_NULL);
+  EXPECT_EQ(FieldIdAt(profile, 1), std::make_optional(5));
+
+  VerifyWrittenData(test_data);
+}
+
+TEST_P(AvroWriterTest, WritesUnknownListElementsAndMapValues) {
+  auto schema = std::make_shared<iceberg::Schema>(std::vector<SchemaField>{
+      SchemaField::MakeRequired(1, "id", int32()),
+      SchemaField::MakeRequired(2, "mysteries",
+                                std::make_shared<ListType>(SchemaField::MakeOptional(
+                                    3, ListType::kElementName, unknown()))),
+      SchemaField::MakeRequired(
+          4, "properties",
+          std::make_shared<MapType>(
+              SchemaField::MakeRequired(5, MapType::kKeyName, string()),
+              SchemaField::MakeOptional(6, MapType::kValueName, unknown()))),
+  });
+
+  std::string test_data = R"([
+    [1, [null, null], [["a", null], ["b", null]]],
+    [2, [], []],
+    [3, [null], [["c", null]]]
+  ])";
+
+  WriteAvroFile(schema, test_data);
+
+  auto avro_schema = PhysicalAvroSchema();
+  auto root = avro_schema.root();
+  ASSERT_EQ(root->type(), ::avro::AVRO_RECORD);
+  ASSERT_EQ(root->leaves(), 3);
+
+  auto mysteries = root->leafAt(1);
+  ASSERT_EQ(mysteries->type(), ::avro::AVRO_ARRAY);
+  ASSERT_EQ(mysteries->leaves(), 1);
+  EXPECT_EQ(mysteries->leafAt(0)->type(), ::avro::AVRO_NULL);
+
+  auto properties = root->leafAt(2);
+  ASSERT_EQ(properties->type(), ::avro::AVRO_MAP);
+  ASSERT_EQ(properties->leaves(), 2);
+  EXPECT_EQ(properties->leafAt(1)->type(), ::avro::AVRO_NULL);
+
+  VerifyWrittenData(test_data);
+}
+
+TEST_P(AvroWriterTest, WritesUnknownFieldsNestedInsideListOrMapStructs) {
+  auto schema = std::make_shared<iceberg::Schema>(std::vector<SchemaField>{
+      SchemaField::MakeOptional(1, "id", int32()),
+      SchemaField::MakeOptional(2, "events",
+                                std::make_shared<ListType>(SchemaField::MakeOptional(
+                                    3, ListType::kElementName,
+                                    std::make_shared<StructType>(std::vector<SchemaField>{
+                                        SchemaField::MakeOptional(4, "name", string()),
+                                        SchemaField::MakeOptional(5, "secret", unknown()),
+                                    })))),
+      SchemaField::MakeOptional(
+          6, "properties",
+          std::make_shared<MapType>(
+              SchemaField::MakeRequired(7, MapType::kKeyName, iceberg::string()),
+              SchemaField::MakeOptional(
+                  8, MapType::kValueName,
+                  std::make_shared<StructType>(std::vector<SchemaField>{
+                      SchemaField::MakeOptional(9, "label", string()),
+                      SchemaField::MakeOptional(10, "secret", unknown()),
+                  })))),
+  });
+
+  std::string test_data = R"([
+    [1, [{"name": "open", "secret": null}, {"name": "close", "secret": null}], [["a", {"label": "A", "secret": null}]]],
+    [2, [], []]
+  ])";
+
+  WriteAvroFile(schema, test_data);
+
+  auto avro_schema = PhysicalAvroSchema();
+  auto root = avro_schema.root();
+  ASSERT_EQ(root->type(), ::avro::AVRO_RECORD);
+  ASSERT_EQ(root->leaves(), 3);
+
+  auto events = UnwrapOptional(root->leafAt(1));
+  ASSERT_EQ(events->type(), ::avro::AVRO_ARRAY);
+  auto event = UnwrapOptional(events->leafAt(0));
+  ASSERT_EQ(event->type(), ::avro::AVRO_RECORD);
+  ASSERT_EQ(event->leaves(), 2);
+  EXPECT_EQ(event->nameAt(0), "name");
+  EXPECT_EQ(FieldIdAt(event, 0), std::make_optional(4));
+  EXPECT_EQ(event->nameAt(1), "secret");
+  EXPECT_EQ(event->leafAt(1)->type(), ::avro::AVRO_NULL);
+  EXPECT_EQ(FieldIdAt(event, 1), std::make_optional(5));
+
+  auto properties = UnwrapOptional(root->leafAt(2));
+  ASSERT_EQ(properties->type(), ::avro::AVRO_MAP);
+  ASSERT_EQ(properties->leaves(), 2);
+  auto value = UnwrapOptional(properties->leafAt(1));
+  ASSERT_EQ(value->type(), ::avro::AVRO_RECORD);
+  ASSERT_EQ(value->leaves(), 2);
+  EXPECT_EQ(value->nameAt(0), "label");
+  EXPECT_EQ(FieldIdAt(value, 0), std::make_optional(9));
+  EXPECT_EQ(value->nameAt(1), "secret");
+  EXPECT_EQ(value->leafAt(1)->type(), ::avro::AVRO_NULL);
+  EXPECT_EQ(FieldIdAt(value, 1), std::make_optional(10));
+
   VerifyWrittenData(test_data);
 }
 

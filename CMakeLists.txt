@@ -24,7 +24,7 @@ endif()
 list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake_modules")
 
 project(Iceberg
-        VERSION 0.3.1
+        VERSION 0.4.0
         DESCRIPTION "Iceberg C++ Project"
         LANGUAGES CXX)
 
@@ -45,6 +45,17 @@ option(ICEBERG_BUILD_TESTS "Build tests" ON)
 option(ICEBERG_BUILD_BUNDLE "Build the battery included library" ON)
 option(ICEBERG_BUILD_REST "Build rest catalog client" ON)
 option(ICEBERG_BUILD_REST_INTEGRATION_TESTS "Build rest catalog integration tests" OFF)
+option(ICEBERG_BUILD_HIVE "Build hive (HMS) catalog client" OFF)
+option(ICEBERG_BUILD_SQL_CATALOG "Build SQL catalog client" OFF)
+# Built-in SQL catalog database connectors. Disable all of them to build a SQL
+# catalog that only works with a user-supplied CatalogStore.
+option(ICEBERG_SQL_SQLITE "Build SQLite connector for SQL catalog" OFF)
+option(ICEBERG_SQL_POSTGRESQL "Build PostgreSQL connector for SQL catalog" OFF)
+option(ICEBERG_SQL_MYSQL "Build MySQL connector for SQL catalog" OFF)
+option(ICEBERG_S3 "Build with S3 support" OFF)
+option(ICEBERG_SIGV4 "Build with SigV4 support" OFF)
+option(ICEBERG_BUNDLE_AWSSDK "Bundle AWS SDK for S3/SigV4 support" ON)
+option(ICEBERG_BUNDLE_THRIFT "Bundle Thrift (from Arrow) for Hive catalog" ON)
 option(ICEBERG_ENABLE_ASAN "Enable Address Sanitizer" OFF)
 option(ICEBERG_ENABLE_UBSAN "Enable Undefined Behavior Sanitizer" OFF)
 

@@ -30,13 +30,14 @@
 #include "iceberg/arrow_c_data.h"
 #include "iceberg/file_format.h"
 #include "iceberg/metrics.h"
+#include "iceberg/metrics_config.h"
 #include "iceberg/result.h"
 #include "iceberg/type_fwd.h"
 #include "iceberg/util/config.h"
 
 namespace iceberg {
 
-class WriterProperties : public ConfigBase<WriterProperties> {
+class ICEBERG_EXPORT WriterProperties : public ConfigBase<WriterProperties> {
  public:
   template <typename T>
   using Entry = const ConfigBase<WriterProperties>::Entry<T>;
@@ -59,6 +60,9 @@ class WriterProperties : public ConfigBase<WriterProperties> {
                                                        "zstd"};
   inline static Entry<std::string> kParquetCompressionLevel{
       "write.parquet.compression-level", ""};
+  /// \brief Maximum number of rows in each Parquet row group.
+  inline static Entry<int64_t> kParquetMaxRowGroupRows{"write.parquet.max-row-group-rows",
+                                                       1024 * 1024};
 
   /// TODO(gangwu): add table properties with write.avro|parquet|orc.*
 
@@ -73,12 +77,12 @@ struct ICEBERG_EXPORT WriterOptions {
   std::string path;
   /// \brief The schema of the data to write.
   std::shared_ptr<Schema> schema;
-  /// \brief FileIO instance to open the file. Writer implementations should down cast it
-  /// to the specific FileIO implementation. By default, the `iceberg-bundle` library uses
-  /// `ArrowFileSystemFileIO` as the default implementation.
+  /// \brief FileIO instance to create the file.
   std::shared_ptr<class FileIO> io;
   /// \brief Metadata to write to the file.
   std::unordered_map<std::string, std::string> metadata;
+  /// \brief Metrics configuration.
+  std::shared_ptr<MetricsConfig> metrics_config = MetricsConfig::Default();
   /// \brief Format-specific or implementation-specific properties.
   WriterProperties properties;
 };

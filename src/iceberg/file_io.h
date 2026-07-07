@@ -19,20 +19,105 @@
 
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "iceberg/iceberg_export.h"
 #include "iceberg/result.h"
+#include "iceberg/storage_credential.h"
 
 namespace iceberg {
 
+class SupportsStorageCredentials;
+
+/// \brief Seekable byte stream for reading file contents.
+class ICEBERG_EXPORT SeekableInputStream {
+ public:
+  virtual ~SeekableInputStream() = default;
+
+  /// \brief Return the current read position.
+  virtual Result<int64_t> Position() const = 0;
+
+  /// \brief Seek to an absolute byte position.
+  virtual Status Seek(int64_t position) = 0;
+
+  /// \brief Read up to out.size() bytes from the current position.
+  virtual Result<int64_t> Read(std::span<std::byte> out) = 0;
+
+  /// \brief Read exactly out.size() bytes from an absolute position.
+  ///
+  /// Fails if fewer than out.size() bytes are available. The current stream position
+  /// after this call is unspecified; callers should Seek before subsequent
+  /// position-dependent reads.
+  virtual Status ReadFully(int64_t position, std::span<std::byte> out) = 0;
+
+  /// \brief Close the stream. Implementations should allow repeated Close calls.
+  virtual Status Close() = 0;
+};
+
+/// \brief Positioned byte stream for writing file contents.
+class ICEBERG_EXPORT PositionOutputStream {
+ public:
+  virtual ~PositionOutputStream() = default;
+
+  /// \brief Return the current write position.
+  virtual Result<int64_t> Position() const = 0;
+
+  /// \brief Return the current stored length of the output.
+  ///
+  /// This can differ from the current position for encrypting streams, and for other
+  /// non-length-preserving streams.
+  virtual Result<int64_t> StoredLength() const { return Position(); }
+
+  /// \brief Write all bytes in data at the current position.
+  virtual Status Write(std::span<const std::byte> data) = 0;
+
+  /// \brief Flush buffered data to the underlying store.
+  virtual Status Flush() = 0;
+
+  /// \brief Close the stream. Implementations should allow repeated Close calls.
+  virtual Status Close() = 0;
+};
+
+/// \brief Handle for opening a readable file.
+class ICEBERG_EXPORT InputFile {
+ public:
+  virtual ~InputFile() = default;
+
+  /// \brief File location represented by this handle.
+  virtual std::string_view location() const = 0;
+
+  /// \brief Return the total file size in bytes.
+  virtual Result<int64_t> Size() const = 0;
+
+  /// \brief Open a new independent input stream.
+  virtual Result<std::unique_ptr<SeekableInputStream>> Open() = 0;
+};
+
+/// \brief Handle for creating a writable file.
+class ICEBERG_EXPORT OutputFile {
+ public:
+  virtual ~OutputFile() = default;
+
+  /// \brief File location represented by this handle.
+  virtual std::string_view location() const = 0;
+
+  /// \brief Create a new output stream and fail if the file already exists.
+  virtual Result<std::unique_ptr<PositionOutputStream>> Create() = 0;
+
+  /// \brief Create a new output stream, replacing any existing file.
+  virtual Result<std::unique_ptr<PositionOutputStream>> CreateOrOverwrite() = 0;
+};
+
 /// \brief Pluggable module for reading, writing, and deleting files.
 ///
-/// This module only handle metadata files, not data files. The metadata files
-/// are typically small and are used to store schema, partition information,
-/// and other metadata about the table.
+/// This module handles metadata and data file bytes for table IO.
 ///
 /// Note that these functions are not atomic. For example, if a write fails,
 /// the file may be partially written. Implementations should be careful to
@@ -42,6 +127,19 @@ class ICEBERG_EXPORT FileIO {
   FileIO() = default;
   virtual ~FileIO() = default;
 
+  /// \brief Create an input file handle for the given location.
+  virtual Result<std::unique_ptr<InputFile>> NewInputFile(std::string file_location);
+
+  /// \brief Create an input file handle for the given location with a known length.
+  ///
+  /// The length is a caller-provided content length hint. Implementations may use it to
+  /// avoid an extra metadata lookup.
+  virtual Result<std::unique_ptr<InputFile>> NewInputFile(std::string file_location,
+                                                          size_t length);
+
+  /// \brief Create an output file handle for the given location.
+  virtual Result<std::unique_ptr<OutputFile>> NewOutputFile(std::string file_location);
+
   /// \brief Read the content of the file at the given location.
   ///
   /// \param file_location The location of the file to read.
@@ -50,21 +148,14 @@ class ICEBERG_EXPORT FileIO {
   /// \return The content of the file if the read succeeded, an error code if the read
   /// failed.
   virtual Result<std::string> ReadFile(const std::string& file_location,
-                                       std::optional<size_t> length) {
-    // We provide a default implementation to avoid Windows linker error LNK2019.
-    return NotImplemented("ReadFile not implemented");
-  }
+                                       std::optional<size_t> length);
 
   /// \brief Write the given content to the file at the given location.
   ///
   /// \param file_location The location of the file to write.
   /// \param content The content to write to the file.
-  /// \param overwrite If true, overwrite the file if it exists. If false, fail if the
-  /// file exists.
   /// \return void if the write succeeded, an error code if the write failed.
-  virtual Status WriteFile(const std::string& file_location, std::string_view content) {
-    return NotImplemented("WriteFile not implemented");
-  }
+  virtual Status WriteFile(const std::string& file_location, std::string_view content);
 
   /// \brief Delete a file at the given location.
   ///
@@ -73,6 +164,34 @@ class ICEBERG_EXPORT FileIO {
   virtual Status DeleteFile(const std::string& file_location) {
     return NotImplemented("DeleteFile not implemented");
   }
+
+  /// \brief Delete files at the given locations.
+  ///
+  /// Implementations that can delete multiple files efficiently should override this
+  /// method. The default implementation deletes files sequentially using DeleteFile
+  /// and returns the first error encountered.
+  ///
+  /// \param file_locations The locations of the files to delete.
+  /// \return void if all deletes succeed, or an error code if any delete fails.
+  virtual Status DeleteFiles(const std::vector<std::string>& file_locations);
+
+  /// \brief Return storage-credential support when implemented by this FileIO.
+  virtual SupportsStorageCredentials* AsSupportsStorageCredentials() { return nullptr; }
+};
+
+/// \brief Mix-in for FileIO implementations that route object paths to
+/// per-prefix file systems built from vended storage credentials, letting the
+/// catalog stay decoupled from concrete storage implementations.
+class ICEBERG_EXPORT SupportsStorageCredentials {
+ public:
+  virtual ~SupportsStorageCredentials() = default;
+
+  /// \brief Install vended storage credentials.
+  virtual Status SetStorageCredentials(
+      const std::vector<StorageCredential>& storage_credentials) = 0;
+
+  /// \brief Return currently installed storage credentials.
+  virtual const std::vector<StorageCredential>& credentials() const = 0;
 };
 
 }  // namespace iceberg

@@ -28,6 +28,7 @@
 #include "iceberg/metadata_columns.h"
 #include "iceberg/parquet/parquet_schema_util_internal.h"
 #include "iceberg/result.h"
+#include "iceberg/schema_internal.h"
 #include "iceberg/schema_util_internal.h"
 #include "iceberg/util/checked_cast.h"
 #include "iceberg/util/formatter.h"  // IWYU pragma: keep
@@ -59,10 +60,61 @@ std::optional<int32_t> GetFieldId(const ::parquet::arrow::SchemaField& parquet_f
   return FieldIdFromMetadata(parquet_field.field->metadata());
 }
 
-// TODO(gangwu): support v3 unknown type
+bool IsNullPhysicalField(const ::parquet::arrow::SchemaField& parquet_field) {
+  return parquet_field.field->type()->id() == ::arrow::Type::NA;
+}
+
+bool HasSelectedColumn(const FieldProjection& projection) {
+  if (projection.attributes) {
+    const auto& attributes =
+        internal::checked_cast<const ParquetExtraAttributes&>(*projection.attributes);
+    if (attributes.column_id) {
+      return true;
+    }
+  }
+  return std::ranges::any_of(projection.children, HasSelectedColumn);
+}
+
+std::optional<int32_t> FirstColumnIndex(
+    const ::parquet::arrow::SchemaField& parquet_field) {
+  if (parquet_field.column_index >= 0) {
+    return parquet_field.column_index;
+  }
+  for (const auto& child : parquet_field.children) {
+    if (auto column_index = FirstColumnIndex(child)) {
+      return column_index;
+    }
+  }
+  return std::nullopt;
+}
+
+// Pick a physical column as an anchor when all children are null-projected,
+// so that Parquet readers can still locate row boundaries.
+void SelectAnchorColumnIfEmpty(
+    FieldProjection* projection,
+    const std::vector<::parquet::arrow::SchemaField>& parquet_fields) {
+  if (HasSelectedColumn(*projection)) {
+    return;
+  }
+  for (const auto& parquet_field : parquet_fields) {
+    if (auto column_index = FirstColumnIndex(parquet_field)) {
+      projection->attributes =
+          std::make_shared<ParquetExtraAttributes>(column_index.value());
+      return;
+    }
+  }
+}
+
+}  // namespace
+
 Status ValidateParquetSchemaEvolution(
     const Type& expected_type, const ::parquet::arrow::SchemaField& parquet_field) {
   const auto& arrow_type = parquet_field.field->type();
+  // Some Parquet files may contain null-only physical fields. Allow reading them as
+  // any optional projected field type.
+  if (arrow_type->id() == ::arrow::Type::NA) {
+    return {};
+  }
   switch (expected_type.type_id()) {
     case TypeId::kBoolean:
       if (arrow_type->id() == ::arrow::Type::BOOL) {
@@ -125,6 +177,26 @@ Status ValidateParquetSchemaEvolution(
         }
       }
       break;
+    case TypeId::kTimestampNs:
+      if (arrow_type->id() == ::arrow::Type::TIMESTAMP) {
+        const auto& timestamp_type =
+            internal::checked_cast<const ::arrow::TimestampType&>(*arrow_type);
+        if (timestamp_type.unit() == ::arrow::TimeUnit::NANO &&
+            timestamp_type.timezone().empty()) {
+          return {};
+        }
+      }
+      break;
+    case TypeId::kTimestampTzNs:
+      if (arrow_type->id() == ::arrow::Type::TIMESTAMP) {
+        const auto& timestamp_type =
+            internal::checked_cast<const ::arrow::TimestampType&>(*arrow_type);
+        if (timestamp_type.unit() == ::arrow::TimeUnit::NANO &&
+            !timestamp_type.timezone().empty()) {
+          return {};
+        }
+      }
+      break;
     case TypeId::kString:
       if (arrow_type->id() == ::arrow::Type::STRING) {
         return {};
@@ -151,7 +223,7 @@ Status ValidateParquetSchemaEvolution(
       if (arrow_type->id() == ::arrow::Type::EXTENSION) {
         const auto& extension_type =
             internal::checked_cast<const ::arrow::ExtensionType&>(*arrow_type);
-        if (extension_type.extension_name() == "arrow.uuid") {
+        if (extension_type.extension_name() == kArrowUuidExtensionName) {
           return {};
         }
       }
@@ -166,6 +238,13 @@ Status ValidateParquetSchemaEvolution(
         }
       }
       break;
+    case TypeId::kUnknown:
+      return {};
+    case TypeId::kVariant:
+    case TypeId::kGeometry:
+    case TypeId::kGeography:
+      return NotSupported("Reading Iceberg type {} from Parquet is not supported",
+                          expected_type);
     case TypeId::kStruct:
       if (arrow_type->id() == ::arrow::Type::STRUCT) {
         return {};
@@ -189,10 +268,41 @@ Status ValidateParquetSchemaEvolution(
                        expected_type, arrow_type->ToString());
 }
 
+namespace {
+
 // Forward declaration
 Result<FieldProjection> ProjectNested(
     const Type& nested_type,
     const std::vector<::parquet::arrow::SchemaField>& parquet_fields);
+
+Result<FieldProjection> ProjectField(const SchemaField& expected_field,
+                                     const ::parquet::arrow::SchemaField& parquet_field,
+                                     size_t source_index) {
+  const Type& expected_type = *expected_field.type();
+
+  FieldProjection projection;
+  if (expected_type.type_id() == TypeId::kUnknown || IsNullPhysicalField(parquet_field)) {
+    if (!expected_field.optional()) {
+      return InvalidSchema("Cannot project required field with id {} as null",
+                           expected_field.field_id());
+    }
+    projection.kind = FieldProjection::Kind::kNull;
+    return projection;
+  }
+
+  ICEBERG_RETURN_UNEXPECTED(ValidateParquetSchemaEvolution(expected_type, parquet_field));
+
+  if (expected_type.is_nested()) {
+    ICEBERG_ASSIGN_OR_RAISE(projection,
+                            ProjectNested(expected_type, parquet_field.children));
+  } else {
+    projection.attributes =
+        std::make_shared<ParquetExtraAttributes>(parquet_field.column_index);
+  }
+  projection.from = source_index;
+  projection.kind = FieldProjection::Kind::kProjected;
+  return projection;
+}
 
 Result<FieldProjection> ProjectStruct(
     const StructType& struct_type,
@@ -228,17 +338,8 @@ Result<FieldProjection> ProjectStruct(
 
     if (auto iter = field_context_map.find(field_id); iter != field_context_map.cend()) {
       const auto& parquet_field = iter->second.parquet_field;
-      ICEBERG_RETURN_UNEXPECTED(
-          ValidateParquetSchemaEvolution(*field.type(), parquet_field));
-      if (field.type()->is_nested()) {
-        ICEBERG_ASSIGN_OR_RAISE(child_projection,
-                                ProjectNested(*field.type(), parquet_field.children));
-      } else {
-        child_projection.attributes =
-            std::make_shared<ParquetExtraAttributes>(parquet_field.column_index);
-      }
-      child_projection.from = iter->second.local_index;
-      child_projection.kind = FieldProjection::Kind::kProjected;
+      ICEBERG_ASSIGN_OR_RAISE(
+          child_projection, ProjectField(field, parquet_field, iter->second.local_index));
     } else if (MetadataColumns::IsMetadataColumn(field_id)) {
       child_projection.kind = FieldProjection::Kind::kMetadata;
     } else if (field.optional()) {
@@ -250,6 +351,7 @@ Result<FieldProjection> ProjectStruct(
     result.children.emplace_back(std::move(child_projection));
   }
 
+  SelectAnchorColumnIfEmpty(&result, parquet_fields);
   PruneFieldProjection(result);
   return result;
 }
@@ -274,23 +376,12 @@ Result<FieldProjection> ProjectList(
                          element_field.field_id(), element_field_id.value());
   }
 
-  ICEBERG_RETURN_UNEXPECTED(
-      ValidateParquetSchemaEvolution(*element_field.type(), parquet_field));
-
-  FieldProjection element_projection;
-  if (element_field.type()->is_nested()) {
-    ICEBERG_ASSIGN_OR_RAISE(element_projection,
-                            ProjectNested(*element_field.type(), parquet_field.children));
-  } else {
-    element_projection.attributes =
-        std::make_shared<ParquetExtraAttributes>(parquet_field.column_index);
-  }
-
-  element_projection.kind = FieldProjection::Kind::kProjected;
-  element_projection.from = size_t{0};
+  ICEBERG_ASSIGN_OR_RAISE(auto element_projection,
+                          ProjectField(element_field, parquet_field, size_t{0}));
 
   FieldProjection result;
   result.children.emplace_back(std::move(element_projection));
+  SelectAnchorColumnIfEmpty(&result, parquet_fields);
   return result;
 }
 
@@ -326,23 +417,20 @@ Result<FieldProjection> ProjectMap(
   result.children.reserve(2);
 
   for (size_t i = 0; i < parquet_fields.size(); ++i) {
-    FieldProjection sub_projection;
     const auto& sub_node = parquet_fields[i];
     const auto& sub_field = map_type.fields()[i];
-    ICEBERG_RETURN_UNEXPECTED(
-        ValidateParquetSchemaEvolution(*sub_field.type(), sub_node));
-    if (sub_field.type()->is_nested()) {
-      ICEBERG_ASSIGN_OR_RAISE(sub_projection,
-                              ProjectNested(*sub_field.type(), sub_node.children));
-    } else {
-      sub_projection.attributes =
-          std::make_shared<ParquetExtraAttributes>(sub_node.column_index);
+    ICEBERG_ASSIGN_OR_RAISE(auto sub_projection, ProjectField(sub_field, sub_node, i));
+    if (sub_projection.kind == FieldProjection::Kind::kNull &&
+        !HasSelectedColumn(sub_projection)) {
+      if (auto column_index = FirstColumnIndex(sub_node)) {
+        sub_projection.attributes =
+            std::make_shared<ParquetExtraAttributes>(column_index.value());
+      }
     }
-    sub_projection.kind = FieldProjection::Kind::kProjected;
-    sub_projection.from = i;
     result.children.emplace_back(std::move(sub_projection));
   }
 
+  SelectAnchorColumnIfEmpty(&result, parquet_fields);
   return result;
 }
 

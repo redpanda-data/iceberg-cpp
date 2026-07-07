@@ -24,6 +24,7 @@
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
+#include "iceberg/expression/literal.h"
 #include "iceberg/json_serde_internal.h"
 #include "iceberg/schema.h"
 #include "iceberg/schema_field.h"
@@ -42,8 +43,8 @@ class TypeJsonTest : public ::testing::TestWithParam<SchemaJsonParam> {};
 TEST_P(TypeJsonTest, SingleTypeRoundTrip) {
   // To Json
   const auto& param = GetParam();
-  auto json = ToJson(*param.type).dump();
-  ASSERT_EQ(param.json, json);
+  ICEBERG_UNWRAP_OR_FAIL(auto json, ToJson(*param.type));
+  ASSERT_EQ(param.json, json.dump());
 
   // From Json
   auto type_result = TypeFromJson(nlohmann::json::parse(param.json));
@@ -64,6 +65,22 @@ INSTANTIATE_TEST_SUITE_P(
         SchemaJsonParam{.json = "\"string\"", .type = iceberg::string()},
         SchemaJsonParam{.json = "\"binary\"", .type = iceberg::binary()},
         SchemaJsonParam{.json = "\"uuid\"", .type = iceberg::uuid()},
+        SchemaJsonParam{.json = "\"unknown\"", .type = iceberg::unknown()},
+        SchemaJsonParam{.json = "\"variant\"", .type = iceberg::variant()},
+        SchemaJsonParam{.json = "\"geometry\"", .type = iceberg::geometry()},
+        SchemaJsonParam{.json = "\"geometry(srid:4326)\"",
+                        .type = iceberg::geometry("srid:4326")},
+        SchemaJsonParam{.json = "\"geography\"", .type = iceberg::geography()},
+        SchemaJsonParam{.json = "\"geography(srid:4326)\"",
+                        .type = iceberg::geography("srid:4326")},
+        SchemaJsonParam{
+            .json = "\"geography(srid:4326, spherical)\"",
+            .type = iceberg::geography("srid:4326", EdgeAlgorithm::kSpherical)},
+        SchemaJsonParam{
+            .json = "\"geography(OGC:CRS84, spherical)\"",
+            .type = iceberg::geography("OGC:CRS84", EdgeAlgorithm::kSpherical)},
+        SchemaJsonParam{.json = "\"geography(srid:4326, karney)\"",
+                        .type = iceberg::geography("srid:4326", EdgeAlgorithm::kKarney)},
         SchemaJsonParam{.json = "\"fixed[8]\"", .type = iceberg::fixed(8)},
         SchemaJsonParam{.json = "\"decimal(10,2)\"", .type = iceberg::decimal(10, 2)},
         SchemaJsonParam{.json = "\"date\"", .type = iceberg::date()},
@@ -71,6 +88,8 @@ INSTANTIATE_TEST_SUITE_P(
         SchemaJsonParam{.json = "\"timestamp\"", .type = iceberg::timestamp()},
         SchemaJsonParam{.json = "\"timestamptz\"",
                         .type = std::make_shared<TimestampTzType>()},
+        SchemaJsonParam{.json = "\"timestamp_ns\"", .type = iceberg::timestamp_ns()},
+        SchemaJsonParam{.json = "\"timestamptz_ns\"", .type = iceberg::timestamptz_ns()},
         SchemaJsonParam{
             .json =
                 R"({"element":"string","element-id":3,"element-required":true,"type":"list"})",
@@ -108,6 +127,48 @@ TEST(TypeJsonTest, FromJsonWithSpaces) {
   ASSERT_EQ(decimal->scale(), 2);
 }
 
+TEST(TypeJsonTest, FromJsonV3TypesWithSpacesAndCase) {
+  auto variant_result = TypeFromJson(nlohmann::json::parse("\"Variant\""));
+  ASSERT_TRUE(variant_result.has_value());
+  ASSERT_EQ(*variant_result.value(), *iceberg::variant());
+
+  auto geometry_result =
+      TypeFromJson(nlohmann::json::parse("\"GEOMETRY( srid: 3857 )\""));
+  ASSERT_TRUE(geometry_result.has_value());
+  ASSERT_EQ(*geometry_result.value(), *iceberg::geometry("srid: 3857"));
+
+  auto geography_result =
+      TypeFromJson(nlohmann::json::parse("\"geography(srid:4269,karney)\""));
+  ASSERT_TRUE(geography_result.has_value());
+  ASSERT_EQ(*geography_result.value(),
+            *iceberg::geography("srid:4269", EdgeAlgorithm::kKarney));
+}
+
+TEST(TypeJsonTest, InvalidV3Types) {
+  auto invalid_geometry = TypeFromJson(nlohmann::json::parse("\"geometry()\""));
+  ASSERT_THAT(invalid_geometry, HasErrorMessage("Invalid geometry type"));
+
+  auto invalid_geometry_with_spaces =
+      TypeFromJson(nlohmann::json::parse("\"geometry( )\""));
+  ASSERT_THAT(invalid_geometry_with_spaces, HasErrorMessage("Invalid geometry type"));
+
+  auto invalid_geography = TypeFromJson(nlohmann::json::parse("\"geography()\""));
+  ASSERT_THAT(invalid_geography, HasErrorMessage("Invalid geography type"));
+
+  auto invalid_geography_with_algorithm =
+      TypeFromJson(nlohmann::json::parse("\"geography( , spherical)\""));
+  ASSERT_THAT(invalid_geography_with_algorithm,
+              HasErrorMessage("Invalid geography type"));
+
+  auto invalid_geography_algorithm =
+      TypeFromJson(nlohmann::json::parse("\"geography(srid:4269, BadAlgorithm)\""));
+  ASSERT_THAT(invalid_geography_algorithm,
+              HasErrorMessage("Invalid edge interpolation algorithm"));
+
+  auto unknown_type = TypeFromJson(nlohmann::json::parse("\"nonsense\""));
+  ASSERT_THAT(unknown_type, HasErrorMessage("Cannot parse type string"));
+}
+
 TEST(SchemaJsonTest, RoundTrip) {
   constexpr std::string_view json =
       R"({"fields":[{"id":1,"name":"id","required":true,"type":"int"},{"id":2,"name":"name","required":false,"type":"string"}],"schema-id":1,"type":"struct"})";
@@ -130,8 +191,138 @@ TEST(SchemaJsonTest, RoundTrip) {
   ASSERT_EQ(field2.type()->type_id(), TypeId::kString);
   ASSERT_TRUE(field2.optional());
 
-  auto dumped_json = ToJson(*schema).dump();
-  ASSERT_EQ(dumped_json, json);
+  ICEBERG_UNWRAP_OR_FAIL(auto schema_json, ToJson(*schema));
+  ASSERT_EQ(schema_json.dump(), json);
+}
+
+TEST(SchemaJsonTest, FieldWithDefaultValuesRoundTrip) {
+  constexpr std::string_view json =
+      R"({"fields":[{"id":1,"initial-default":42,"name":"id","required":true,"type":"int","write-default":7},{"id":2,"initial-default":"n/a","name":"name","required":false,"type":"string"}],"schema-id":1,"type":"struct"})";
+
+  ICEBERG_UNWRAP_OR_FAIL(auto schema, SchemaFromJson(nlohmann::json::parse(json)));
+  ASSERT_EQ(schema->fields().size(), 2);
+
+  const auto& field1 = schema->fields()[0];
+  ASSERT_NE(field1.initial_default(), nullptr);
+  ASSERT_EQ(*field1.initial_default(), Literal::Int(42));
+  ASSERT_NE(field1.write_default(), nullptr);
+  ASSERT_EQ(*field1.write_default(), Literal::Int(7));
+
+  const auto& field2 = schema->fields()[1];
+  ASSERT_NE(field2.initial_default(), nullptr);
+  ASSERT_EQ(*field2.initial_default(), Literal::String("n/a"));
+  ASSERT_EQ(field2.write_default(), nullptr);
+
+  ICEBERG_UNWRAP_OR_FAIL(auto schema_json, ToJson(*schema));
+  ASSERT_EQ(schema_json.dump(), json);
+}
+
+TEST(SchemaJsonTest, FieldWithMismatchedDefaultValueFails) {
+  constexpr std::string_view json =
+      R"({"fields":[{"id":1,"initial-default":"oops","name":"id","required":true,"type":"int"}],"schema-id":1,"type":"struct"})";
+
+  auto result = SchemaFromJson(nlohmann::json::parse(json));
+  ASSERT_FALSE(result.has_value());
+}
+
+TEST(SchemaJsonTest, NestedFieldWithDefaultValuesRoundTrip) {
+  constexpr std::string_view json =
+      R"({"fields":[{"id":1,"name":"person","required":true,"type":{"fields":[{"id":2,"initial-default":18,"name":"age","required":true,"type":"int","write-default":21}],"type":"struct"}}],"schema-id":1,"type":"struct"})";
+
+  ICEBERG_UNWRAP_OR_FAIL(auto schema, SchemaFromJson(nlohmann::json::parse(json)));
+  const auto& person = schema->fields()[0];
+  const auto& nested = dynamic_cast<const StructType&>(*person.type()).fields()[0];
+  ASSERT_NE(nested.initial_default(), nullptr);
+  ASSERT_EQ(*nested.initial_default(), Literal::Int(18));
+  ASSERT_NE(nested.write_default(), nullptr);
+  ASSERT_EQ(*nested.write_default(), Literal::Int(21));
+
+  ICEBERG_UNWRAP_OR_FAIL(auto schema_json, ToJson(*schema));
+  ASSERT_EQ(schema_json.dump(), json);
+}
+
+TEST(SchemaJsonTest, UnknownFieldRoundTrip) {
+  constexpr std::string_view json =
+      R"({"fields":[{"id":1,"name":"mystery","required":false,"type":"unknown"}],"schema-id":1,"type":"struct"})";
+
+  ICEBERG_UNWRAP_OR_FAIL(auto schema, SchemaFromJson(nlohmann::json::parse(json)));
+  ASSERT_EQ(schema->fields().size(), 1);
+
+  const auto& field = schema->fields()[0];
+  ASSERT_EQ(field.field_id(), 1);
+  ASSERT_EQ(field.name(), "mystery");
+  ASSERT_EQ(field.type()->type_id(), TypeId::kUnknown);
+  ASSERT_TRUE(field.optional());
+  ICEBERG_UNWRAP_OR_FAIL(auto schema_json, ToJson(*schema));
+  ASSERT_EQ(schema_json.dump(), json);
+}
+
+TEST(SchemaJsonTest, NestedUnknownFieldsRoundTrip) {
+  constexpr std::string_view json =
+      R"({
+        "fields": [
+          {
+            "id": 1,
+            "name": "profile",
+            "required": false,
+            "type": {
+              "fields": [
+                {"id": 2, "name": "mystery", "required": false, "type": "unknown"}
+              ],
+              "type": "struct"
+            }
+          },
+          {
+            "id": 3,
+            "name": "mysteries",
+            "required": false,
+            "type": {
+              "element": "unknown",
+              "element-id": 4,
+              "element-required": false,
+              "type": "list"
+            }
+          },
+          {
+            "id": 5,
+            "name": "properties",
+            "required": false,
+            "type": {
+              "key": "string",
+              "key-id": 6,
+              "type": "map",
+              "value": "unknown",
+              "value-id": 7,
+              "value-required": false
+            }
+          }
+        ],
+        "schema-id": 1,
+        "type": "struct"
+      })";
+  const auto parsed_json = nlohmann::json::parse(json);
+
+  ICEBERG_UNWRAP_OR_FAIL(auto schema, SchemaFromJson(parsed_json));
+  ASSERT_EQ(schema->fields().size(), 3);
+
+  const auto* profile = dynamic_cast<const StructType*>(schema->fields()[0].type().get());
+  ASSERT_NE(profile, nullptr);
+  ASSERT_EQ(profile->fields().size(), 1);
+  ASSERT_EQ(profile->fields()[0].type()->type_id(), TypeId::kUnknown);
+  ASSERT_TRUE(profile->fields()[0].optional());
+
+  const auto* mysteries = dynamic_cast<const ListType*>(schema->fields()[1].type().get());
+  ASSERT_NE(mysteries, nullptr);
+  ASSERT_EQ(mysteries->fields()[0].type()->type_id(), TypeId::kUnknown);
+  ASSERT_TRUE(mysteries->fields()[0].optional());
+
+  const auto* properties = dynamic_cast<const MapType*>(schema->fields()[2].type().get());
+  ASSERT_NE(properties, nullptr);
+  ASSERT_EQ(properties->value().type()->type_id(), TypeId::kUnknown);
+  ASSERT_TRUE(properties->value().optional());
+
+  ICEBERG_UNWRAP_OR_FAIL(auto schema_json, ToJson(*schema));
+  ASSERT_EQ(schema_json, parsed_json);
 }
 
 TEST(SchemaJsonTest, IdentifierFieldIds) {
@@ -150,7 +341,8 @@ TEST(SchemaJsonTest, IdentifierFieldIds) {
   ASSERT_EQ(schema_with_identifers->schema_id(), 1);
   ASSERT_EQ(schema_with_identifers->IdentifierFieldIds().size(), 1);
   ASSERT_EQ(schema_with_identifers->IdentifierFieldIds()[0], 1);
-  ASSERT_EQ(ToJson(*schema_with_identifers), json_with_identifiers);
+  ICEBERG_UNWRAP_OR_FAIL(auto json_with_identifiers_out, ToJson(*schema_with_identifers));
+  ASSERT_EQ(json_with_identifiers_out, json_with_identifiers);
 
   // Test schema without identifier-field-ids
   constexpr std::string_view json_without_identifiers_str =
@@ -163,7 +355,9 @@ TEST(SchemaJsonTest, IdentifierFieldIds) {
   ICEBERG_UNWRAP_OR_FAIL(auto schema_without_identifiers,
                          SchemaFromJson(json_without_identifiers));
   ASSERT_TRUE(schema_without_identifiers->IdentifierFieldIds().empty());
-  ASSERT_EQ(ToJson(*schema_without_identifiers), json_without_identifiers);
+  ICEBERG_UNWRAP_OR_FAIL(auto json_without_identifiers_out,
+                         ToJson(*schema_without_identifiers));
+  ASSERT_EQ(json_without_identifiers_out, json_without_identifiers);
 
   // Test schema with multiple identifier fields
   constexpr std::string_view json_multi_identifiers_str =
@@ -179,7 +373,9 @@ TEST(SchemaJsonTest, IdentifierFieldIds) {
   ASSERT_EQ(schema_multi_identifiers->IdentifierFieldIds().size(), 2);
   ASSERT_EQ(schema_multi_identifiers->IdentifierFieldIds()[0], 1);
   ASSERT_EQ(schema_multi_identifiers->IdentifierFieldIds()[1], 2);
-  ASSERT_EQ(ToJson(*schema_multi_identifiers), json_multi_identifiers);
+  ICEBERG_UNWRAP_OR_FAIL(auto json_multi_identifiers_out,
+                         ToJson(*schema_multi_identifiers));
+  ASSERT_EQ(json_multi_identifiers_out, json_multi_identifiers);
 }
 
 }  // namespace iceberg

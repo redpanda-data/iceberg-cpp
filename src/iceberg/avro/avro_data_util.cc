@@ -35,6 +35,7 @@
 #include "iceberg/avro/avro_schema_util_internal.h"
 #include "iceberg/metadata_columns.h"
 #include "iceberg/schema.h"
+#include "iceberg/schema_internal.h"
 #include "iceberg/schema_util.h"
 #include "iceberg/util/checked_cast.h"
 #include "iceberg/util/macros.h"
@@ -395,10 +396,10 @@ Status AppendPrimitiveValueToBuilder(const ::avro::NodePtr& avro_node,
     }
 
     case TypeId::kDate: {
-      if (avro_node->type() != ::avro::AVRO_INT ||
-          avro_node->logicalType().type() != ::avro::LogicalType::DATE) {
+      if (!IsAvroDateOrPlainInt(avro_node)) {
         return InvalidArgument(
-            "Expected Avro int with DATE logical type for date field, got: {}",
+            "Expected Avro int with DATE logical type or plain int for date field, got: "
+            "{}",
             ToString(avro_node));
       }
       auto* builder = internal::checked_cast<::arrow::Date32Builder*>(array_builder);
@@ -431,6 +432,19 @@ Status AppendPrimitiveValueToBuilder(const ::avro::NodePtr& avro_node,
       return {};
     }
 
+    case TypeId::kTimestampNs:
+    case TypeId::kTimestampTzNs: {
+      if (avro_node->type() != ::avro::AVRO_LONG ||
+          avro_node->logicalType().type() != ::avro::LogicalType::TIMESTAMP_NANOS) {
+        return InvalidArgument(
+            "Expected Avro long with TIMESTAMP_NANOS for timestamp field, got: {}",
+            ToString(avro_node));
+      }
+      auto* builder = internal::checked_cast<::arrow::TimestampBuilder*>(array_builder);
+      ICEBERG_ARROW_RETURN_NOT_OK(builder->Append(avro_datum.value<int64_t>()));
+      return {};
+    }
+
     default:
       return InvalidArgument("Unsupported primitive type {} to append avro node {}",
                              projected_field.type()->ToString(), ToString(avro_node));
@@ -444,6 +458,11 @@ Status AppendFieldToBuilder(const ::avro::NodePtr& avro_node,
                             const SchemaField& projected_field,
                             const arrow::MetadataColumnContext& metadata_context,
                             ::arrow::ArrayBuilder* array_builder) {
+  if (projection.kind == FieldProjection::Kind::kNull) {
+    ICEBERG_ARROW_RETURN_NOT_OK(array_builder->AppendNull());
+    return {};
+  }
+
   if (avro_node->type() == ::avro::AVRO_UNION) {
     size_t branch = avro_datum.unionBranch();
     if (avro_node->leafAt(branch)->type() == ::avro::AVRO_NULL) {
@@ -494,6 +513,9 @@ Status ExtractDatumFromArray(const ::arrow::Array& array, int64_t index,
   }
 
   if (array.IsNull(index)) {
+    if (datum->type() == ::avro::AVRO_NULL) {
+      return {};
+    }
     if (!datum->isUnion()) [[unlikely]] {
       return InvalidSchema("Cannot extract null to non-union type: {}",
                            ::avro::toString(datum->type()));
@@ -599,7 +621,9 @@ Status ExtractDatumFromArray(const ::arrow::Array& array, int64_t index,
     }
 
     case ::arrow::Type::EXTENSION: {
-      if (array.type()->name() == "arrow.uuid") {
+      const auto& extension_type =
+          internal::checked_cast<const ::arrow::ExtensionType&>(*array.type());
+      if (extension_type.extension_name() == kArrowUuidExtensionName) {
         const auto& extension_array =
             internal::checked_cast<const ::arrow::ExtensionArray&>(array);
         const auto& fixed_array =
@@ -611,7 +635,8 @@ Status ExtractDatumFromArray(const ::arrow::Array& array, int64_t index,
         return {};
       }
 
-      return NotSupported("Unsupported Arrow extension type: {}", array.type()->name());
+      return NotSupported("Unsupported Arrow extension type: {}",
+                          extension_type.extension_name());
     }
 
     case ::arrow::Type::STRUCT: {

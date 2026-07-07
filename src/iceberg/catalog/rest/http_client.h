@@ -67,13 +67,25 @@ class ICEBERG_REST_EXPORT HttpResponse {
   std::unique_ptr<Impl> impl_;
 };
 
-/// \brief SSL/TLS configuration for the HTTP client.
+/// \brief TLS/SSL options for the REST HTTP client.
 struct ICEBERG_REST_EXPORT SslConfig {
+  /// Verify the server certificate and hostname (maps to CURLOPT_SSL_VERIFYPEER
+  /// / CURLOPT_SSL_VERIFYHOST). Default: true.
   bool verify = true;
+  /// Path to a CA certificate bundle file (CURLOPT_CAINFO).
   std::string ca_info;
+  /// Path to a directory of CA certificates (CURLOPT_CAPATH).
   std::string ca_path;
+  /// Path to a certificate revocation list file (CURLOPT_CRLFILE).
   std::string crl_file;
 };
+
+/// \brief Build an SslConfig from REST catalog properties.
+///
+/// Recognized keys: "ssl.verify" (true unless the value is exactly "false"),
+/// "ssl.ca-info", "ssl.ca-path", "ssl.crl-file". Absent keys leave defaults.
+ICEBERG_REST_EXPORT SslConfig
+SslConfigFromProperties(const std::unordered_map<std::string, std::string>& properties);
 
 /// \brief HTTP client for making requests to Iceberg REST Catalog API.
 class ICEBERG_REST_EXPORT HttpClient {

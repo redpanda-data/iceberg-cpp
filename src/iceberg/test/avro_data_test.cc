@@ -299,6 +299,30 @@ const std::vector<AppendDatumParam> kPrimitiveTestCases = {
             R"([{"a": 1672531200000000}, {"a": 1672531201000000}, {"a": 1672531202000000}])",
     },
     {
+        .name = "TimestampNs",
+        .projected_type = iceberg::timestamp_ns(),
+        .source_type = iceberg::timestamp_ns(),
+        .value_setter =
+            [](::avro::GenericDatum& datum, int i) {
+              datum.value<::avro::GenericRecord>().fieldAt(0).value<int64_t>() =
+                  1672531200000000000LL + i * 1000000000LL + i;
+            },
+        .expected_json =
+            R"([{"a": 1672531200000000000}, {"a": 1672531201000000001}, {"a": 1672531202000000002}])",
+    },
+    {
+        .name = "TimestampTzNs",
+        .projected_type = iceberg::timestamptz_ns(),
+        .source_type = iceberg::timestamptz_ns(),
+        .value_setter =
+            [](::avro::GenericDatum& datum, int i) {
+              datum.value<::avro::GenericRecord>().fieldAt(0).value<int64_t>() =
+                  1672531200000000000LL + i * 1000000000LL + i;
+            },
+        .expected_json =
+            R"([{"a": 1672531200000000000}, {"a": 1672531201000000001}, {"a": 1672531202000000002}])",
+    },
+    {
         .name = "IntToLongPromotion",
         .projected_type = iceberg::int64(),
         .source_type = iceberg::int32(),
@@ -948,6 +972,30 @@ const std::vector<ExtractDatumParam> kExtractDatumTestCases = {
                         1672531200000000LL + i * 1000000LL);
             },
     },
+    {
+        .name = "TimestampNs",
+        .iceberg_type = timestamp_ns(),
+        .arrow_json =
+            R"([{"a": 1672531200000000000}, {"a": 1672531201000000001}, {"a": 1672531202000000002}])",
+        .value_verifier =
+            [](const ::avro::GenericDatum& datum, int i) {
+              const auto& record = datum.value<::avro::GenericRecord>();
+              EXPECT_EQ(record.fieldAt(0).value<int64_t>(),
+                        1672531200000000000LL + i * 1000000000LL + i);
+            },
+    },
+    {
+        .name = "TimestampTzNs",
+        .iceberg_type = timestamptz_ns(),
+        .arrow_json =
+            R"([{"a": 1672531200000000000}, {"a": 1672531201000000001}, {"a": 1672531202000000002}])",
+        .value_verifier =
+            [](const ::avro::GenericDatum& datum, int i) {
+              const auto& record = datum.value<::avro::GenericRecord>();
+              EXPECT_EQ(record.fieldAt(0).value<int64_t>(),
+                        1672531200000000000LL + i * 1000000000LL + i);
+            },
+    },
 };
 
 INSTANTIATE_TEST_SUITE_P(AllPrimitiveTypes, ExtractDatumFromArrayTest,
@@ -1191,6 +1239,27 @@ TEST(ExtractDatumFromArrayTest, NullHandling) {
   const auto& record2 = datum.value<::avro::GenericRecord>();
   EXPECT_EQ(record2.fieldAt(0).unionBranch(), 0);
   EXPECT_EQ(record2.fieldAt(0).type(), ::avro::AVRO_NULL);
+}
+
+TEST(ExtractDatumFromArrayTest, UnknownType) {
+  Schema iceberg_schema({SchemaField::MakeOptional(1, "a", unknown())});
+  ::avro::NodePtr avro_node;
+  ASSERT_THAT(ToAvroNodeVisitor{}.Visit(iceberg_schema, &avro_node), IsOk());
+
+  ArrowSchema arrow_c_schema;
+  ASSERT_THAT(ToArrowSchema(iceberg_schema, &arrow_c_schema), IsOk());
+  auto arrow_schema = ::arrow::ImportSchema(&arrow_c_schema).ValueOrDie();
+  auto arrow_struct_type = std::make_shared<::arrow::StructType>(arrow_schema->fields());
+
+  auto arrow_array =
+      ::arrow::json::ArrayFromJSONString(arrow_struct_type, R"([{"a": null}])")
+          .ValueOrDie();
+
+  ::avro::GenericDatum datum(avro_node);
+  ASSERT_THAT(ExtractDatumFromArray(*arrow_array, 0, &datum), IsOk());
+
+  const auto& record = datum.value<::avro::GenericRecord>();
+  EXPECT_EQ(record.fieldAt(0).type(), ::avro::AVRO_NULL);
 }
 
 struct RoundTripParam {

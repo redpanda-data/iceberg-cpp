@@ -28,6 +28,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "iceberg/encryption/encrypted_key.h"
 #include "iceberg/iceberg_export.h"
 #include "iceberg/table_properties.h"
 #include "iceberg/type_fwd.h"
@@ -77,7 +78,10 @@ struct ICEBERG_EXPORT TableMetadata {
   static constexpr int64_t kInitialSequenceNumber = 0;
   static constexpr int64_t kInitialRowId = 0;
 
-  static inline const std::unordered_map<TypeId, int8_t> kMinFormatVersions = {};
+  static inline const std::unordered_map<TypeId, int8_t> kMinFormatVersions = {
+      {TypeId::kTimestampNs, 3}, {TypeId::kTimestampTzNs, 3}, {TypeId::kUnknown, 3},
+      {TypeId::kVariant, 3},     {TypeId::kGeometry, 3},      {TypeId::kGeography, 3},
+  };
 
   /// An integer version number for the format
   int8_t format_version;
@@ -125,6 +129,8 @@ struct ICEBERG_EXPORT TableMetadata {
   std::vector<std::shared_ptr<struct PartitionStatisticsFile>> partition_statistics;
   /// A `long` higher than all assigned row IDs
   int64_t next_row_id;
+  /// A list of encrypted table key entries
+  std::vector<EncryptedKey> encryption_keys;
 
   static Result<std::unique_ptr<TableMetadata>> Make(
       const iceberg::Schema& schema, const iceberg::PartitionSpec& spec,
@@ -442,7 +448,7 @@ class ICEBERG_EXPORT TableMetadataBuilder : public ErrorCollector {
   ///
   /// \param key The encryption key to add
   /// \return Reference to this builder for method chaining
-  TableMetadataBuilder& AddEncryptionKey(std::shared_ptr<EncryptedKey> key);
+  TableMetadataBuilder& AddEncryptionKey(EncryptedKey key);
 
   /// \brief Remove an encryption key from the table by key ID
   ///

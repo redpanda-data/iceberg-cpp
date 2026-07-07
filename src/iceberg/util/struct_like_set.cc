@@ -263,6 +263,8 @@ Status ValidateScalarAgainstType(const Scalar& scalar, const Type& type) {
   }
 
   switch (type.type_id()) {
+    case TypeId::kUnknown:
+      return InvalidArgument("Expected unknown but got {}", ScalarTypeName(scalar));
     case TypeId::kBoolean:
       ICEBERG_PRECHECK(std::holds_alternative<bool>(scalar),
                        "Expected boolean but got {}", ScalarTypeName(scalar));
@@ -276,6 +278,8 @@ Status ValidateScalarAgainstType(const Scalar& scalar, const Type& type) {
     case TypeId::kTime:
     case TypeId::kTimestamp:
     case TypeId::kTimestampTz:
+    case TypeId::kTimestampNs:
+    case TypeId::kTimestampTzNs:
       ICEBERG_PRECHECK(std::holds_alternative<int64_t>(scalar), "Expected {} but got {}",
                        type.ToString(), ScalarTypeName(scalar));
       return {};
@@ -338,6 +342,11 @@ Status ValidateScalarAgainstType(const Scalar& scalar, const Type& type) {
       return ValidateMapLikeAgainstType(*map,
                                         internal::checked_cast<const MapType&>(type));
     }
+    case TypeId::kVariant:
+    case TypeId::kGeometry:
+    case TypeId::kGeography:
+      return NotSupported("Scalar validation for type {} is not supported",
+                          type.ToString());
   }
 
   std::unreachable();

@@ -17,28 +17,39 @@
  * under the License.
  */
 
+#include <functional>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include <arrow/api.h>
 #include <arrow/c/bridge.h>
 #include <arrow/extension/uuid.h>
 #include <arrow/result.h>
 #include <arrow/type_fwd.h>
+#include <arrow/util/config.h>
 #include <arrow/util/key_value_metadata.h>
+#include <arrow/util/thread_pool.h>
 #include <gtest/gtest.h>
 
+#include "iceberg/arrow/arrow_status_internal.h"
 #include "iceberg/constants.h"
+#include "iceberg/result.h"
 #include "iceberg/schema.h"
 #include "iceberg/schema_internal.h"
 #include "iceberg/test/matchers.h"
+#include "iceberg/util/executor.h"
+#include "iceberg/util/task_group.h"
 
 namespace iceberg {
 
 struct ToArrowSchemaParam {
   std::shared_ptr<Type> iceberg_type;
   bool optional = true;
-  std::shared_ptr<arrow::DataType> arrow_type;
+  std::shared_ptr<::arrow::DataType> arrow_type;
 };
 
 class ToArrowSchemaTest : public ::testing::TestWithParam<ToArrowSchemaParam> {};
@@ -89,11 +100,17 @@ INSTANTIATE_TEST_SUITE_P(
         ToArrowSchemaParam{.iceberg_type = iceberg::date(),
                            .arrow_type = ::arrow::date32()},
         ToArrowSchemaParam{.iceberg_type = iceberg::time(),
-                           .arrow_type = ::arrow::time64(arrow::TimeUnit::MICRO)},
+                           .arrow_type = ::arrow::time64(::arrow::TimeUnit::MICRO)},
         ToArrowSchemaParam{.iceberg_type = iceberg::timestamp(),
-                           .arrow_type = ::arrow::timestamp(arrow::TimeUnit::MICRO)},
-        ToArrowSchemaParam{.iceberg_type = iceberg::timestamp(),
-                           .arrow_type = ::arrow::timestamp(arrow::TimeUnit::MICRO)},
+                           .arrow_type = ::arrow::timestamp(::arrow::TimeUnit::MICRO)},
+        ToArrowSchemaParam{
+            .iceberg_type = iceberg::timestamp_tz(),
+            .arrow_type = ::arrow::timestamp(::arrow::TimeUnit::MICRO, "UTC")},
+        ToArrowSchemaParam{.iceberg_type = iceberg::timestamp_ns(),
+                           .arrow_type = ::arrow::timestamp(::arrow::TimeUnit::NANO)},
+        ToArrowSchemaParam{
+            .iceberg_type = iceberg::timestamptz_ns(),
+            .arrow_type = ::arrow::timestamp(::arrow::TimeUnit::NANO, "UTC")},
         ToArrowSchemaParam{.iceberg_type = iceberg::string(),
                            .arrow_type = ::arrow::utf8()},
         ToArrowSchemaParam{.iceberg_type = iceberg::binary(),
@@ -101,7 +118,23 @@ INSTANTIATE_TEST_SUITE_P(
         ToArrowSchemaParam{.iceberg_type = iceberg::uuid(),
                            .arrow_type = ::arrow::extension::uuid()},
         ToArrowSchemaParam{.iceberg_type = iceberg::fixed(20),
-                           .arrow_type = ::arrow::fixed_size_binary(20)}));
+                           .arrow_type = ::arrow::fixed_size_binary(20)},
+        ToArrowSchemaParam{.iceberg_type = iceberg::unknown(),
+                           .arrow_type = ::arrow::null()}));
+
+TEST(ToArrowSchemaTest, UnsupportedV3Types) {
+  const std::vector<std::shared_ptr<Type>> unsupported_types = {
+      iceberg::variant(), iceberg::geometry(), iceberg::geography()};
+
+  for (const auto& unsupported_type : unsupported_types) {
+    Schema schema(
+        {SchemaField::MakeOptional(/*field_id=*/1, "unsupported", unsupported_type)},
+        /*schema_id=*/0);
+    ArrowSchema arrow_schema;
+    ASSERT_THAT(ToArrowSchema(schema, &arrow_schema),
+                HasErrorMessage("is not supported by Arrow conversion"));
+  }
+}
 
 namespace {
 
@@ -227,8 +260,83 @@ TEST(ToArrowSchemaTest, MapType) {
                                           /*nullable=*/true, kValueFieldId));
 }
 
+TEST(ToArrowSchemaTest, NestedUnknownFieldsRoundTrip) {
+  Schema schema(
+      {
+          SchemaField::MakeOptional(
+              /*field_id=*/1, "profile",
+              std::make_shared<StructType>(std::vector<SchemaField>{
+                  SchemaField::MakeOptional(/*field_id=*/2, "mystery",
+                                            iceberg::unknown()),
+              })),
+          SchemaField::MakeOptional(
+              /*field_id=*/3, "mysteries",
+              std::make_shared<ListType>(SchemaField::MakeOptional(
+                  /*field_id=*/4, "element", iceberg::unknown()))),
+          SchemaField::MakeOptional(
+              /*field_id=*/5, "properties",
+              std::make_shared<MapType>(
+                  SchemaField::MakeRequired(/*field_id=*/6, "key", iceberg::string()),
+                  SchemaField::MakeOptional(/*field_id=*/7, "value",
+                                            iceberg::unknown()))),
+      },
+      /*schema_id=*/0);
+
+  ArrowSchema arrow_c_schema;
+  ASSERT_THAT(ToArrowSchema(schema, &arrow_c_schema), IsOk());
+
+  auto imported_schema = ::arrow::ImportSchema(&arrow_c_schema).ValueOrDie();
+  ASSERT_EQ(imported_schema->num_fields(), 3);
+
+  auto profile_type =
+      std::static_pointer_cast<::arrow::StructType>(imported_schema->field(0)->type());
+  ASSERT_EQ(profile_type->num_fields(), 1);
+  ASSERT_NO_FATAL_FAILURE(CheckArrowField(*profile_type->field(0), ::arrow::Type::NA,
+                                          "mystery", /*nullable=*/true,
+                                          /*field_id=*/2));
+
+  auto mysteries_type =
+      std::static_pointer_cast<::arrow::ListType>(imported_schema->field(1)->type());
+  ASSERT_NO_FATAL_FAILURE(CheckArrowField(*mysteries_type->value_field(),
+                                          ::arrow::Type::NA, "element",
+                                          /*nullable=*/true, /*field_id=*/4));
+
+  auto properties_type =
+      std::static_pointer_cast<::arrow::MapType>(imported_schema->field(2)->type());
+  ASSERT_NO_FATAL_FAILURE(CheckArrowField(*properties_type->key_field(),
+                                          ::arrow::Type::STRING, "key",
+                                          /*nullable=*/false, /*field_id=*/6));
+  ASSERT_NO_FATAL_FAILURE(CheckArrowField(*properties_type->item_field(),
+                                          ::arrow::Type::NA, "value",
+                                          /*nullable=*/true, /*field_id=*/7));
+
+  ArrowSchema exported_schema;
+  ASSERT_TRUE(::arrow::ExportSchema(*imported_schema, &exported_schema).ok());
+  auto schema_result = FromArrowSchema(exported_schema, /*schema_id=*/0);
+  ASSERT_THAT(schema_result, IsOk());
+  ArrowSchemaRelease(&exported_schema);
+
+  const auto& round_tripped_schema = *schema_result.value();
+  ASSERT_EQ(round_tripped_schema.fields().size(), 3);
+
+  const auto* profile =
+      dynamic_cast<const StructType*>(round_tripped_schema.fields()[0].type().get());
+  ASSERT_NE(profile, nullptr);
+  ASSERT_EQ(profile->fields()[0].type()->type_id(), TypeId::kUnknown);
+
+  const auto* mysteries =
+      dynamic_cast<const ListType*>(round_tripped_schema.fields()[1].type().get());
+  ASSERT_NE(mysteries, nullptr);
+  ASSERT_EQ(mysteries->fields()[0].type()->type_id(), TypeId::kUnknown);
+
+  const auto* properties =
+      dynamic_cast<const MapType*>(round_tripped_schema.fields()[2].type().get());
+  ASSERT_NE(properties, nullptr);
+  ASSERT_EQ(properties->value().type()->type_id(), TypeId::kUnknown);
+}
+
 struct FromArrowSchemaParam {
-  std::shared_ptr<arrow::DataType> arrow_type;
+  std::shared_ptr<::arrow::DataType> arrow_type;
   bool optional = true;
   std::shared_ptr<Type> iceberg_type;
 };
@@ -282,13 +390,18 @@ INSTANTIATE_TEST_SUITE_P(
                              .iceberg_type = iceberg::decimal(10, 2)},
         FromArrowSchemaParam{.arrow_type = ::arrow::date32(),
                              .iceberg_type = iceberg::date()},
-        FromArrowSchemaParam{.arrow_type = ::arrow::time64(arrow::TimeUnit::MICRO),
+        FromArrowSchemaParam{.arrow_type = ::arrow::time64(::arrow::TimeUnit::MICRO),
                              .iceberg_type = iceberg::time()},
-        FromArrowSchemaParam{.arrow_type = ::arrow::timestamp(arrow::TimeUnit::MICRO),
+        FromArrowSchemaParam{.arrow_type = ::arrow::timestamp(::arrow::TimeUnit::MICRO),
                              .iceberg_type = iceberg::timestamp()},
         FromArrowSchemaParam{
-            .arrow_type = ::arrow::timestamp(arrow::TimeUnit::MICRO, "UTC"),
+            .arrow_type = ::arrow::timestamp(::arrow::TimeUnit::MICRO, "UTC"),
             .iceberg_type = std::make_shared<TimestampTzType>()},
+        FromArrowSchemaParam{.arrow_type = ::arrow::timestamp(::arrow::TimeUnit::NANO),
+                             .iceberg_type = iceberg::timestamp_ns()},
+        FromArrowSchemaParam{
+            .arrow_type = ::arrow::timestamp(::arrow::TimeUnit::NANO, "UTC"),
+            .iceberg_type = iceberg::timestamptz_ns()},
         FromArrowSchemaParam{.arrow_type = ::arrow::utf8(),
                              .iceberg_type = iceberg::string()},
         FromArrowSchemaParam{.arrow_type = ::arrow::binary(),
@@ -296,7 +409,51 @@ INSTANTIATE_TEST_SUITE_P(
         FromArrowSchemaParam{.arrow_type = ::arrow::extension::uuid(),
                              .iceberg_type = iceberg::uuid()},
         FromArrowSchemaParam{.arrow_type = ::arrow::fixed_size_binary(20),
-                             .iceberg_type = iceberg::fixed(20)}));
+                             .iceberg_type = iceberg::fixed(20)},
+        FromArrowSchemaParam{.arrow_type = ::arrow::null(),
+                             .iceberg_type = iceberg::unknown()}));
+
+TEST(FromArrowSchemaTest, RejectRequiredNullFieldAsUnknown) {
+  auto metadata =
+      ::arrow::key_value_metadata(std::unordered_map<std::string, std::string>{
+          {std::string(kParquetFieldIdKey), "1"}});
+  auto arrow_schema = ::arrow::schema({::arrow::field(
+      "mystery", ::arrow::null(), /*nullable=*/false, std::move(metadata))});
+
+  ArrowSchema exported_schema;
+  ASSERT_TRUE(::arrow::ExportSchema(*arrow_schema, &exported_schema).ok());
+
+  auto schema_result = FromArrowSchema(exported_schema, /*schema_id=*/0);
+  ArrowSchemaRelease(&exported_schema);
+
+  ASSERT_THAT(schema_result, IsError(ErrorKind::kInvalidSchema));
+  ASSERT_THAT(schema_result,
+              HasErrorMessage("Arrow null field 'mystery' must be nullable"));
+}
+
+TEST(FromArrowSchemaTest, RejectRequiredNullListElementAsUnknown) {
+  auto list_metadata =
+      ::arrow::key_value_metadata(std::unordered_map<std::string, std::string>{
+          {std::string(kParquetFieldIdKey), "1"}});
+  auto element_metadata =
+      ::arrow::key_value_metadata(std::unordered_map<std::string, std::string>{
+          {std::string(kParquetFieldIdKey), "2"}});
+  auto element_field = ::arrow::field("element", ::arrow::null(), /*nullable=*/false,
+                                      std::move(element_metadata));
+  auto arrow_schema =
+      ::arrow::schema({::arrow::field("mysteries", ::arrow::list(element_field),
+                                      /*nullable=*/true, std::move(list_metadata))});
+
+  ArrowSchema exported_schema;
+  ASSERT_TRUE(::arrow::ExportSchema(*arrow_schema, &exported_schema).ok());
+
+  auto schema_result = FromArrowSchema(exported_schema, /*schema_id=*/0);
+  ArrowSchemaRelease(&exported_schema);
+
+  ASSERT_THAT(schema_result, IsError(ErrorKind::kInvalidSchema));
+  ASSERT_THAT(schema_result,
+              HasErrorMessage("Arrow null field 'element' must be nullable"));
+}
 
 TEST(FromArrowSchemaTest, StructType) {
   constexpr int32_t kStructFieldId = 1;
@@ -454,6 +611,52 @@ TEST(FromArrowSchemaTest, MapType) {
   ASSERT_EQ(value.field_id(), kValueFieldId);
   ASSERT_TRUE(value.optional());
   ASSERT_EQ(value.type()->type_id(), TypeId::kInt);
+}
+
+TEST(ArrowExecutorAdapterTest, RunsTaskGroupOnThreadPool) {
+#ifndef ARROW_ENABLE_THREADING
+  GTEST_SKIP() << "Test requires ARROW_ENABLE_THREADING=ON";
+#endif
+
+  class ArrowExecutorAdapter final : public Executor {
+   public:
+    explicit ArrowExecutorAdapter(::arrow::internal::Executor& executor)
+        : executor_(executor) {}
+
+    Status Submit(ExecutorTask task) override {
+      ICEBERG_ARROW_RETURN_NOT_OK(executor_.Spawn(std::move(task)));
+      return {};
+    }
+
+   private:
+    ::arrow::internal::Executor& executor_;
+  };
+
+  auto thread_pool = ::arrow::internal::ThreadPool::Make(2).ValueOrDie();
+  ArrowExecutorAdapter executor(*thread_pool);
+
+  std::mutex mutex;
+  std::vector<std::thread::id> thread_ids;
+
+  auto status = TaskGroup()
+                    .SetExecutor(std::ref(executor))
+                    .Submit([&]() -> Status {
+                      std::lock_guard lock(mutex);
+                      thread_ids.push_back(std::this_thread::get_id());
+                      return {};
+                    })
+                    .Submit([&]() -> Status {
+                      std::lock_guard lock(mutex);
+                      thread_ids.push_back(std::this_thread::get_id());
+                      return {};
+                    })
+                    .Run();
+
+  EXPECT_THAT(status, IsOk());
+  EXPECT_EQ(thread_ids.size(), 2);
+  EXPECT_NE(thread_ids[0], std::this_thread::get_id());
+  EXPECT_NE(thread_ids[1], std::this_thread::get_id());
+  EXPECT_TRUE(thread_pool->Shutdown().ok());
 }
 
 }  // namespace iceberg

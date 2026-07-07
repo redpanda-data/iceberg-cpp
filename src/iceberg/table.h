@@ -176,6 +176,22 @@ class ICEBERG_EXPORT Table : public std::enable_shared_from_this<Table> {
   /// \brief Create a new FastAppend to append data files and commit the changes.
   virtual Result<std::shared_ptr<FastAppend>> NewFastAppend();
 
+  /// \brief Create a new MergeAppend to append data files and merge manifests.
+  virtual Result<std::shared_ptr<MergeAppend>> NewMergeAppend();
+
+  /// \brief Create a new DeleteFiles to delete data files and commit the changes.
+  virtual Result<std::shared_ptr<DeleteFiles>> NewDeleteFiles();
+
+  /// \brief Create a new RowDelta to add rows and row-level deletes.
+  virtual Result<std::shared_ptr<RowDelta>> NewRowDelta();
+
+  /// \brief Create a new OverwriteFiles to overwrite data files and commit the changes.
+  virtual Result<std::shared_ptr<OverwriteFiles>> NewOverwrite();
+
+  /// \brief Create a new RewriteFiles to replace files in this table and commit the
+  /// changes.
+  virtual Result<std::shared_ptr<RewriteFiles>> NewRewriteFiles();
+
   /// \brief Create a new SnapshotManager to manage snapshots and snapshot references.
   virtual Result<std::shared_ptr<SnapshotManager>> NewSnapshotManager();
 
@@ -212,7 +228,7 @@ class ICEBERG_EXPORT StagedTable final : public Table {
 
 /// \brief A read-only table.
 
-class ICEBERG_EXPORT StaticTable final : public Table {
+class ICEBERG_EXPORT StaticTable : public Table {
  public:
   static Result<std::shared_ptr<StaticTable>> Make(
       TableIdentifier identifier, std::shared_ptr<TableMetadata> metadata,
@@ -227,6 +243,33 @@ class ICEBERG_EXPORT StaticTable final : public Table {
   Result<std::shared_ptr<UpdateProperties>> NewUpdateProperties() override;
 
   Result<std::shared_ptr<UpdateSchema>> NewUpdateSchema() override;
+
+  Result<std::shared_ptr<UpdateLocation>> NewUpdateLocation() override;
+
+  Result<std::shared_ptr<UpdatePartitionSpec>> NewUpdatePartitionSpec() override;
+
+  Result<std::shared_ptr<UpdateSortOrder>> NewUpdateSortOrder() override;
+
+  Result<std::shared_ptr<ExpireSnapshots>> NewExpireSnapshots() override;
+
+  Result<std::shared_ptr<UpdateStatistics>> NewUpdateStatistics() override;
+
+  Result<std::shared_ptr<UpdatePartitionStatistics>> NewUpdatePartitionStatistics()
+      override;
+
+  Result<std::shared_ptr<FastAppend>> NewFastAppend() override;
+
+  Result<std::shared_ptr<MergeAppend>> NewMergeAppend() override;
+
+  Result<std::shared_ptr<DeleteFiles>> NewDeleteFiles() override;
+
+  Result<std::shared_ptr<RowDelta>> NewRowDelta() override;
+
+  Result<std::shared_ptr<OverwriteFiles>> NewOverwrite() override;
+
+  Result<std::shared_ptr<RewriteFiles>> NewRewriteFiles() override;
+
+  Result<std::shared_ptr<SnapshotManager>> NewSnapshotManager() override;
 
  private:
   using Table::Table;

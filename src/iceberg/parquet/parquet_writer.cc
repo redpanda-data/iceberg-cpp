@@ -19,29 +19,32 @@
 
 #include "iceberg/parquet/parquet_writer.h"
 
+#include <cmath>
+#include <cstdint>
 #include <memory>
+#include <optional>
+#include <string_view>
+#include <type_traits>
+#include <unordered_map>
+#include <vector>
 
+#include <arrow/array.h>
 #include <arrow/c/bridge.h>
 #include <arrow/record_batch.h>
+#include <arrow/util/compression.h>
 #include <arrow/util/key_value_metadata.h>
 #include <parquet/arrow/schema.h>
 #include <parquet/arrow/writer.h>
 #include <parquet/file_writer.h>
-#include <parquet/metadata.h>
 #include <parquet/properties.h>
-#include <parquet/schema.h>
-#include <parquet/statistics.h>
 
-#include "iceberg/arrow/arrow_fs_file_io_internal.h"
+#include "iceberg/arrow/arrow_io_internal.h"
 #include "iceberg/arrow/arrow_status_internal.h"
-#include "iceberg/expression/literal.h"
-#include "iceberg/metrics.h"
-#include "iceberg/schema.h"
-#include "iceberg/schema_field.h"
+#include "iceberg/parquet/parquet_metrics_internal.h"
 #include "iceberg/schema_internal.h"
 #include "iceberg/type.h"
-#include "iceberg/util/checked_cast.h"
 #include "iceberg/util/macros.h"
+#include "iceberg/util/visit_type.h"
 
 namespace iceberg::parquet {
 
@@ -49,9 +52,7 @@ namespace {
 
 Result<std::shared_ptr<::arrow::io::OutputStream>> OpenOutputStream(
     const WriterOptions& options) {
-  auto io = internal::checked_pointer_cast<arrow::ArrowFileSystemFileIO>(options.io);
-  ICEBERG_ARROW_ASSIGN_OR_RETURN(auto output, io->fs()->OpenOutputStream(options.path));
-  return output;
+  return arrow::OpenArrowOutputStream(options.io, options.path);
 }
 
 Result<::arrow::Compression::type> ParseCompression(const WriterProperties& properties) {
@@ -73,6 +74,156 @@ Result<::arrow::Compression::type> ParseCompression(const WriterProperties& prop
   }
 }
 
+Status CheckCompressionAvailable(std::string_view compression_name,
+                                 ::arrow::Compression::type compression) {
+  ICEBERG_PRECHECK(::arrow::util::Codec::IsAvailable(compression),
+                   "Parquet compression codec {} is not available in the current build",
+                   compression_name);
+  return {};
+}
+
+template <typename ArrowArrayType, typename ValueType>
+Status UpdateFloatingFieldMetrics(int32_t field_id, const ::arrow::Array& arrow_array,
+                                  const std::vector<uint8_t>* valid_rows,
+                                  std::unordered_map<int32_t, FieldMetrics>& metrics) {
+  constexpr auto expected_type_id =
+      std::is_same_v<ValueType, float> ? ::arrow::Type::FLOAT : ::arrow::Type::DOUBLE;
+  ICEBERG_PRECHECK(arrow_array.type_id() == expected_type_id,
+                   "Expected Arrow floating-point array for field metrics collection");
+  const auto& array = static_cast<const ArrowArrayType&>(arrow_array);
+  auto& field_metrics = metrics[field_id];
+  field_metrics.field_id = field_id;
+  if (field_metrics.value_count < 0) {
+    field_metrics.value_count = 0;
+  }
+  if (field_metrics.null_value_count < 0) {
+    field_metrics.null_value_count = 0;
+  }
+  if (field_metrics.nan_value_count < 0) {
+    field_metrics.nan_value_count = 0;
+  }
+
+  field_metrics.value_count += array.length();
+
+  for (int64_t i = 0; i < array.length(); ++i) {
+    if ((valid_rows != nullptr && (*valid_rows)[i] == 0) || array.IsNull(i)) {
+      ++field_metrics.null_value_count;
+      continue;
+    }
+
+    ValueType value = array.Value(i);
+    if (std::isnan(value)) {
+      ++field_metrics.nan_value_count;
+      continue;
+    }
+
+    auto literal = [&]() {
+      if constexpr (std::is_same_v<ValueType, float>) {
+        return Literal::Float(value);
+      } else {
+        return Literal::Double(value);
+      }
+    }();
+    if (!field_metrics.lower_bound.has_value() ||
+        literal < field_metrics.lower_bound.value()) {
+      field_metrics.lower_bound = literal;
+    }
+    if (!field_metrics.upper_bound.has_value() ||
+        literal > field_metrics.upper_bound.value()) {
+      field_metrics.upper_bound = std::move(literal);
+    }
+  }
+
+  return {};
+}
+
+std::optional<std::vector<uint8_t>> BuildValidRows(const ::arrow::Array& array,
+                                                   const std::vector<uint8_t>* parent) {
+  if (parent == nullptr && array.null_count() == 0) {
+    return std::nullopt;
+  }
+
+  std::vector<uint8_t> valid_rows(array.length(), 1);
+  for (int64_t i = 0; i < array.length(); ++i) {
+    if ((parent != nullptr && (*parent)[i] == 0) || array.IsNull(i)) {
+      valid_rows[i] = 0;
+    }
+  }
+  return valid_rows;
+}
+
+class FieldMetricsCollector {
+ public:
+  FieldMetricsCollector(std::unordered_map<int32_t, FieldMetrics>& metrics,
+                        const MetricsConfig& metrics_config, const Schema& schema)
+      : metrics_(metrics), metrics_config_(metrics_config), schema_(schema) {}
+
+  Status VisitStruct(const StructType& type, const ::arrow::Array& array) {
+    ICEBERG_PRECHECK(array.type_id() == ::arrow::Type::STRUCT,
+                     "Expected Arrow struct array for Iceberg struct metrics collection");
+    const auto& struct_array = static_cast<const ::arrow::StructArray&>(array);
+    ICEBERG_PRECHECK(
+        struct_array.num_fields() == type.fields().size(),
+        "Arrow struct field count does not match Iceberg struct field count");
+
+    for (int i = 0; i < struct_array.num_fields(); ++i) {
+      ICEBERG_RETURN_UNEXPECTED(VisitField(type.fields()[i], *struct_array.field(i)));
+    }
+    return {};
+  }
+
+  Status VisitList(const ListType& /*type*/, const ::arrow::Array& /*array*/) {
+    return {};
+  }
+
+  Status VisitMap(const MapType& /*type*/, const ::arrow::Array& /*array*/) { return {}; }
+
+  Status VisitVariant(const VariantType& /*type*/, const ::arrow::Array& /*array*/) {
+    return {};
+  }
+
+  Status VisitPrimitive(const PrimitiveType& type, const ::arrow::Array& array) {
+    switch (type.type_id()) {
+      case TypeId::kFloat:
+        return UpdateFloatingFieldMetrics<::arrow::FloatArray, float>(
+            field_id_, array, valid_rows_, metrics_);
+      case TypeId::kDouble:
+        return UpdateFloatingFieldMetrics<::arrow::DoubleArray, double>(
+            field_id_, array, valid_rows_, metrics_);
+      default:
+        return {};
+    }
+  }
+
+ private:
+  Status VisitField(const SchemaField& field, const ::arrow::Array& array) {
+    // Skip metrics collection for fields whose mode is kNone in MetricsConfig.
+    ICEBERG_ASSIGN_OR_RAISE(auto column_name,
+                            schema_.FindColumnNameById(field.field_id()));
+    if (column_name.has_value() && metrics_config_.ColumnMode(column_name.value()).kind ==
+                                       MetricsMode::Kind::kNone) {
+      return {};
+    }
+
+    auto previous_valid_rows = valid_rows_;
+    auto field_valid_rows = BuildValidRows(array, previous_valid_rows);
+    if (field_valid_rows.has_value()) {
+      valid_rows_ = &field_valid_rows.value();
+    }
+
+    field_id_ = field.field_id();
+    auto status = VisitTypeCategory(*field.type(), this, array);
+    valid_rows_ = previous_valid_rows;
+    return status;
+  }
+
+  std::unordered_map<int32_t, FieldMetrics>& metrics_;
+  const MetricsConfig& metrics_config_;
+  const Schema& schema_;
+  const std::vector<uint8_t>* valid_rows_ = nullptr;
+  int32_t field_id_ = -1;
+};
+
 Result<std::optional<int32_t>> ParseCodecLevel(const WriterProperties& properties) {
   auto level_str = properties.Get(WriterProperties::kParquetCompressionLevel);
   if (level_str.empty()) {
@@ -87,11 +238,18 @@ Result<std::optional<int32_t>> ParseCodecLevel(const WriterProperties& propertie
 class ParquetWriter::Impl {
  public:
   Status Open(const WriterOptions& options) {
+    schema_ = options.schema;
+
     ICEBERG_ASSIGN_OR_RAISE(auto compression, ParseCompression(options.properties));
     ICEBERG_ASSIGN_OR_RAISE(auto compression_level, ParseCodecLevel(options.properties));
 
     auto properties_builder = ::parquet::WriterProperties::Builder();
     properties_builder.compression(compression);
+    auto max_row_group_rows =
+        options.properties.Get(WriterProperties::kParquetMaxRowGroupRows);
+    ICEBERG_PRECHECK(max_row_group_rows > 0,
+                     "Parquet max row group rows must be greater than 0");
+    properties_builder.max_row_group_length(max_row_group_rows);
     if (compression_level.has_value()) {
       properties_builder.compression_level(compression_level.value());
     }
@@ -99,15 +257,17 @@ class ParquetWriter::Impl {
     auto arrow_writer_properties = ::parquet::default_arrow_writer_properties();
 
     ArrowSchema c_schema;
-    ICEBERG_RETURN_UNEXPECTED(ToArrowSchema(*options.schema, &c_schema));
+    ICEBERG_RETURN_UNEXPECTED(ToArrowSchema(*schema_, &c_schema));
     ICEBERG_ARROW_ASSIGN_OR_RETURN(arrow_schema_, ::arrow::ImportSchema(&c_schema));
 
-    std::shared_ptr<::parquet::SchemaDescriptor> schema_descriptor;
     ICEBERG_ARROW_RETURN_NOT_OK(
         ::parquet::arrow::ToParquetSchema(arrow_schema_.get(), *writer_properties,
-                                          *arrow_writer_properties, &schema_descriptor));
+                                          *arrow_writer_properties, &parquet_schema_));
     auto schema_node = std::static_pointer_cast<::parquet::schema::GroupNode>(
-        schema_descriptor->schema_root());
+        parquet_schema_->schema_root());
+
+    ICEBERG_RETURN_UNEXPECTED(CheckCompressionAvailable(
+        options.properties.Get(WriterProperties::kParquetCompression), compression));
 
     ICEBERG_ASSIGN_OR_RAISE(output_stream_, OpenOutputStream(options));
     auto file_writer = ::parquet::ParquetFileWriter::Open(
@@ -117,7 +277,7 @@ class ParquetWriter::Impl {
         ::parquet::arrow::FileWriter::Make(pool_, std::move(file_writer), arrow_schema_,
                                            std::move(arrow_writer_properties), &writer_));
 
-    iceberg_schema_ = options.schema;
+    metrics_config_ = options.metrics_config;
 
     return {};
   }
@@ -125,6 +285,12 @@ class ParquetWriter::Impl {
   Status Write(ArrowArray* array) {
     ICEBERG_ARROW_ASSIGN_OR_RETURN(auto batch,
                                    ::arrow::ImportRecordBatch(array, arrow_schema_));
+
+    ICEBERG_ARROW_ASSIGN_OR_RETURN(auto struct_array, batch->ToStructArray());
+    FieldMetricsCollector field_metrics_collector(field_metrics_, *metrics_config_,
+                                                  *schema_);
+    ICEBERG_RETURN_UNEXPECTED(
+        field_metrics_collector.VisitStruct(*schema_, *struct_array));
 
     ICEBERG_ARROW_RETURN_NOT_OK(writer_->WriteRecordBatch(*batch));
 
@@ -138,12 +304,11 @@ class ParquetWriter::Impl {
     }
 
     ICEBERG_ARROW_RETURN_NOT_OK(writer_->Close());
-    auto& metadata = writer_->metadata();
-    split_offsets_.reserve(metadata->num_row_groups());
-    for (int i = 0; i < metadata->num_row_groups(); ++i) {
-      split_offsets_.push_back(metadata->RowGroup(i)->file_offset());
+    metadata_ = writer_->metadata();
+    split_offsets_.reserve(metadata_->num_row_groups());
+    for (int i = 0; i < metadata_->num_row_groups(); ++i) {
+      split_offsets_.push_back(metadata_->RowGroup(i)->file_offset());
     }
-    PopulateMetrics(*metadata);
     writer_.reset();
 
     ICEBERG_ARROW_ASSIGN_OR_RETURN(total_bytes_, output_stream_->Tell());
@@ -166,117 +331,37 @@ class ParquetWriter::Impl {
 
   std::vector<int64_t> split_offsets() const { return split_offsets_; }
 
-  const Metrics& metrics() const { return metrics_; }
+  Result<Metrics> metrics() {
+    ICEBERG_PRECHECK(writer_ == nullptr, "Cannot return metrics for unclosed writer");
+    ICEBERG_PRECHECK(metadata_ != nullptr,
+                     "Cannot return metrics because Parquet metadata is not available");
+    return ParquetMetrics::GetMetrics(*schema_, *parquet_schema_, *metrics_config_,
+                                      *metadata_, field_metrics_);
+  }
 
  private:
-  // Populate the Metrics struct from the Parquet file's FileMetaData.
-  // Column chunk stats are aggregated across row groups, and Parquet physical
-  // min/max bytes are decoded into Iceberg Literals via the single-value
-  // binary serialization format (which matches Parquet's physical encoding
-  // for primitive types).
-  void PopulateMetrics(const ::parquet::FileMetaData& metadata) {
-    metrics_ = {};
-    metrics_.row_count = metadata.num_rows();
-
-    if (iceberg_schema_ == nullptr) {
-      return;
-    }
-
-    const int num_columns = metadata.num_columns();
-    std::vector<int32_t> field_ids(num_columns, -1);
-    std::vector<std::shared_ptr<PrimitiveType>> field_types(num_columns);
-    for (int c = 0; c < num_columns; ++c) {
-      const auto* col_desc = metadata.schema()->Column(c);
-      auto node = col_desc->schema_node();
-      if (!node || node->field_id() < 0) continue;
-      const int32_t fid = node->field_id();
-      auto field_result = iceberg_schema_->FindFieldById(fid);
-      if (!field_result.has_value() || !field_result->has_value()) continue;
-      const auto& type = field_result->value().get().type();
-      if (!type || !type->is_primitive()) continue;
-      field_ids[c] = fid;
-      field_types[c] = std::static_pointer_cast<PrimitiveType>(type);
-    }
-
-    // Holders for running min/max bytes per field_id.
-    std::unordered_map<int32_t, std::string> min_bounds;
-    std::unordered_map<int32_t, std::string> max_bounds;
-
-    for (int rg = 0; rg < metadata.num_row_groups(); ++rg) {
-      const auto row_group = metadata.RowGroup(rg);
-      for (int c = 0; c < num_columns; ++c) {
-        const int32_t fid = field_ids[c];
-        if (fid < 0) continue;
-        const auto col_chunk = row_group->ColumnChunk(c);
-        metrics_.column_sizes[fid] += col_chunk->total_compressed_size();
-        metrics_.value_counts[fid] += col_chunk->num_values();
-
-        if (!col_chunk->is_stats_set()) continue;
-        auto stats = col_chunk->statistics();
-        if (!stats) continue;
-        if (stats->HasNullCount()) {
-          metrics_.null_value_counts[fid] += stats->null_count();
-        }
-        if (stats->HasMinMax()) {
-          auto min_bytes = stats->EncodeMin();
-          auto max_bytes = stats->EncodeMax();
-          auto& cur_min = min_bounds[fid];
-          auto& cur_max = max_bounds[fid];
-          if (cur_min.empty() || min_bytes < cur_min) {
-            cur_min = std::move(min_bytes);
-          }
-          if (cur_max.empty() || max_bytes > cur_max) {
-            cur_max = std::move(max_bytes);
-          }
-        }
-      }
-    }
-
-    for (auto& [fid, bytes] : min_bounds) {
-      const auto& type = field_types[FindColumnIndex(field_ids, fid)];
-      auto lit = Literal::Deserialize(
-          std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(bytes.data()),
-                                   bytes.size()),
-          type);
-      if (lit.has_value()) {
-        metrics_.lower_bounds.emplace(fid, std::move(*lit));
-      }
-    }
-    for (auto& [fid, bytes] : max_bounds) {
-      const auto& type = field_types[FindColumnIndex(field_ids, fid)];
-      auto lit = Literal::Deserialize(
-          std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(bytes.data()),
-                                   bytes.size()),
-          type);
-      if (lit.has_value()) {
-        metrics_.upper_bounds.emplace(fid, std::move(*lit));
-      }
-    }
-  }
-
-  static int FindColumnIndex(const std::vector<int32_t>& field_ids, int32_t fid) {
-    for (size_t i = 0; i < field_ids.size(); ++i) {
-      if (field_ids[i] == fid) return static_cast<int>(i);
-    }
-    return -1;
-  }
-
   // TODO(gangwu): make memory pool configurable
   ::arrow::MemoryPool* pool_ = ::arrow::default_memory_pool();
+  // Schema to write from the Iceberg table.
+  std::shared_ptr<Schema> schema_;
   // Schema to write from the Parquet file.
   std::shared_ptr<::arrow::Schema> arrow_schema_;
-  // Iceberg schema, retained for field_id/type lookup when populating metrics.
-  std::shared_ptr<Schema> iceberg_schema_;
+  // Parquet schema descriptor generated from the Arrow schema.
+  std::shared_ptr<::parquet::SchemaDescriptor> parquet_schema_;
+  // Metrics config for collecting metrics during write.
+  std::shared_ptr<MetricsConfig> metrics_config_;
   // The output stream to write Parquet file.
   std::shared_ptr<::arrow::io::OutputStream> output_stream_;
   // Parquet file writer to write ArrowArray.
   std::unique_ptr<::parquet::arrow::FileWriter> writer_;
+  // Store the metadata if writer has been closed.
+  std::shared_ptr<::parquet::FileMetaData> metadata_;
   // Total length of the written Parquet file.
   int64_t total_bytes_{0};
   // Row group start offsets in the Parquet file.
   std::vector<int64_t> split_offsets_;
-  // Computed file metrics, filled in Close().
-  Metrics metrics_;
+  // Write-side metrics for fields whose Parquet footer metrics are incomplete.
+  std::unordered_map<int32_t, FieldMetrics> field_metrics_;
 };
 
 ParquetWriter::~ParquetWriter() = default;
@@ -290,12 +375,7 @@ Status ParquetWriter::Write(ArrowArray* array) { return impl_->Write(array); }
 
 Status ParquetWriter::Close() { return impl_->Close(); }
 
-Result<Metrics> ParquetWriter::metrics() {
-  if (!impl_->Closed()) {
-    return Invalid("ParquetWriter is not closed");
-  }
-  return impl_->metrics();
-}
+Result<Metrics> ParquetWriter::metrics() { return impl_->metrics(); }
 
 Result<int64_t> ParquetWriter::length() { return impl_->length(); }
 

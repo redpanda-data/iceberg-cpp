@@ -25,13 +25,16 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 
-#include "iceberg/iceberg_export.h"
+#include "iceberg/iceberg_data_export.h"
 #include "iceberg/result.h"
 
 namespace iceberg {
+
+class PositionDeleteIndex;
 
 /// \brief A bitmap that supports positive 64-bit positions, optimized
 /// for cases where most positions fit in 32 bits.
@@ -42,10 +45,10 @@ namespace iceberg {
 /// maintained to store positions for that key.
 ///
 
-/// \note This class is used to represent deletion vectors.  The Puffin puffin
-/// reader/write handle adding the additional required framing (length prefix, magic,
-/// magic bytes, CRC-32) for  `deletion-vector-v1` persistence.
-class ICEBERG_EXPORT RoaringPositionBitmap {
+/// \note This class is used to represent deletion vectors. The Puffin reader/writer
+/// handle adding the additional required framing (length prefix, magic bytes, CRC-32)
+/// for `deletion-vector-v1` persistence.
+class ICEBERG_DATA_EXPORT RoaringPositionBitmap {
  public:
   /// \brief Maximum supported position (aligned with the Java implementation).
   static constexpr int64_t kMaxPosition = 0x7FFFFFFE80000000LL;
@@ -110,6 +113,12 @@ class ICEBERG_EXPORT RoaringPositionBitmap {
   std::unique_ptr<Impl> impl_;
 
   explicit RoaringPositionBitmap(std::unique_ptr<Impl> impl);
+
+  // Bulk-add positions sharing high-32-bit `key`. Internal hook for
+  // `PositionDeleteIndex::BulkAddForKey`; per-key grouping is the caller's
+  // job, keeping this a thin wrapper around CRoaring's `addMany`.
+  void AddManyForKey(int32_t key, std::span<const uint32_t> positions);
+  friend class PositionDeleteIndex;
 };
 
 }  // namespace iceberg

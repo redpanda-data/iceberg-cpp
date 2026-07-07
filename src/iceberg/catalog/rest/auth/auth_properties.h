@@ -54,29 +54,21 @@ class ICEBERG_REST_EXPORT AuthProperties : public ConfigBase<AuthProperties> {
 
   // ---- SigV4 entries ----
 
-  inline static const std::string kSigV4Region = "rest.auth.sigv4.region";
-  inline static const std::string kSigV4Service = "rest.auth.sigv4.service";
+  /// Deprecated: `rest.sigv4-enabled=true` selects SigV4 regardless of
+  /// `rest.auth.type`.
+  inline static const std::string kSigV4Enabled = "rest.sigv4-enabled";
   inline static const std::string kSigV4DelegateAuthType =
       "rest.auth.sigv4.delegate-auth-type";
-  inline static const std::string kSigV4AccessKeyId = "rest.auth.sigv4.access-key-id";
-  inline static const std::string kSigV4SecretAccessKey =
-      "rest.auth.sigv4.secret-access-key";
-  inline static const std::string kSigV4SessionToken = "rest.auth.sigv4.session-token";
-  /// Selects which credential source drives SigV4 signing. Values:
-  ///   "static"  — use the access-key-id/secret-access-key/session-token
-  ///               properties. Best for tests and short-lived scripts.
-  ///   "default" — aws-crt-cpp's cached default chain:
-  ///               Environment → Profile → STS Web Identity (IRSA) → IMDSv2/ECS.
-  ///               Best for EC2/EKS/ECS deployments where creds rotate.
-  /// If unset, we infer: "static" when an access-key-id is configured,
-  /// "default" otherwise.
-  inline static const std::string kSigV4CredentialsProvider =
-      "rest.auth.sigv4.credentials-provider";
-  inline static constexpr std::string_view kSigV4ProviderStatic = "static";
-  inline static constexpr std::string_view kSigV4ProviderDefault = "default";
-  /// Default service name when rest.auth.sigv4.service is unset — matches the
-  /// Java Iceberg client, which defaults to AWS API Gateway's signing name.
-  inline static constexpr std::string_view kSigV4DefaultService = "execute-api";
+
+  /// SigV4 signing region. If unset, SigV4 resolves the signing region from
+  /// AWS environment/profile configuration and fails if no region can be
+  /// resolved.
+  inline static const std::string kSigV4SigningRegion = "rest.signing-region";
+  inline static const std::string kSigV4SigningName = "rest.signing-name";
+  inline static const std::string kSigV4SigningNameDefault = "execute-api";
+  inline static const std::string kSigV4AccessKeyId = "rest.access-key-id";
+  inline static const std::string kSigV4SecretAccessKey = "rest.secret-access-key";
+  inline static const std::string kSigV4SessionToken = "rest.session-token";
 
   // ---- OAuth2 entries ----
 
@@ -87,10 +79,10 @@ class ICEBERG_REST_EXPORT AuthProperties : public ConfigBase<AuthProperties> {
                                                     "v1/oauth/tokens"};
   inline static Entry<bool> kKeepRefreshed{"token-refresh-enabled", true};
   inline static Entry<bool> kExchangeEnabled{"token-exchange-enabled", true};
-  inline static Entry<std::string> kAudience{"audience", ""};
-  inline static Entry<std::string> kResource{"resource", ""};
   inline static Entry<int64_t> kExpiryMarginSeconds{"oauth2.token-refresh-margin-seconds",
                                                     300};
+  inline static Entry<std::string> kAudience{"audience", ""};
+  inline static Entry<std::string> kResource{"resource", ""};
 
   /// \brief Build an AuthProperties from a properties map.
   static Result<AuthProperties> FromProperties(
@@ -108,7 +100,7 @@ class ICEBERG_REST_EXPORT AuthProperties : public ConfigBase<AuthProperties> {
   bool keep_refreshed() const { return Get(kKeepRefreshed); }
   /// \brief Whether token exchange is enabled.
   bool exchange_enabled() const { return Get(kExchangeEnabled); }
-  /// \brief Token expiry safety margin in seconds.
+  /// \brief Seconds before expiry at which to refresh the OAuth2 token.
   int64_t expiry_margin_seconds() const { return Get(kExpiryMarginSeconds); }
 
   /// \brief Parsed client_id from credential (empty if no colon).

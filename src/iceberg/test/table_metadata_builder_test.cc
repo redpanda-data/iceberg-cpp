@@ -36,6 +36,8 @@
 #include "iceberg/test/matchers.h"
 #include "iceberg/transform.h"
 #include "iceberg/type.h"
+#include "iceberg/util/timepoint.h"
+#include "iceberg/util/uuid.h"
 
 namespace iceberg {
 
@@ -102,9 +104,10 @@ TEST(TableMetadataTest, Make) {
 
   ICEBERG_UNWRAP_OR_FAIL(
       auto metadata, TableMetadata::Make(*Schema, *spec, *order, "s3://bucket/test", {}));
+  EXPECT_THAT(Uuid::FromString(metadata->table_uuid), IsOk());
   // Check schema fields
   ASSERT_EQ(1, metadata->schemas.size());
-  auto fields = std::ranges::to<std::vector>(metadata->schemas[0]->fields());
+  auto fields = metadata->schemas[0]->fields() | std::ranges::to<std::vector>();
   ASSERT_EQ(3, fields.size());
   EXPECT_EQ(1, fields[0].field_id());
   EXPECT_EQ("id", fields[0].name());
@@ -119,7 +122,8 @@ TEST(TableMetadataTest, Make) {
   // Check partition spec
   ASSERT_EQ(1, metadata->partition_specs.size());
   EXPECT_EQ(PartitionSpec::kInitialSpecId, metadata->partition_specs[0]->spec_id());
-  auto spec_fields = std::ranges::to<std::vector>(metadata->partition_specs[0]->fields());
+  auto spec_fields =
+      metadata->partition_specs[0]->fields() | std::ranges::to<std::vector>();
   ASSERT_EQ(1, spec_fields.size());
   EXPECT_EQ(PartitionSpec::kInvalidPartitionFieldId + 1, spec_fields[0].field_id());
   EXPECT_EQ(2, spec_fields[0].source_id());
@@ -128,7 +132,7 @@ TEST(TableMetadataTest, Make) {
   // Check sort order
   ASSERT_EQ(1, metadata->sort_orders.size());
   EXPECT_EQ(SortOrder::kInitialSortOrderId, metadata->sort_orders[0]->order_id());
-  auto order_fields = std::ranges::to<std::vector>(metadata->sort_orders[0]->fields());
+  auto order_fields = metadata->sort_orders[0]->fields() | std::ranges::to<std::vector>();
   ASSERT_EQ(1, order_fields.size());
   EXPECT_EQ(3, order_fields[0].source_id());
   EXPECT_EQ(SortDirection::kAscending, order_fields[0].direction());
@@ -359,6 +363,40 @@ TEST(TableMetadataBuilderTest, RemoveProperties) {
   EXPECT_EQ(metadata->properties.configs().size(), 2);
   EXPECT_EQ(metadata->properties.configs().at("key1"), "value1");
   EXPECT_EQ(metadata->properties.configs().at("key3"), "value3");
+}
+
+TEST(TableMetadataBuilderTest, AddAndRemoveEncryptionKey) {
+  auto base = CreateBaseMetadata();
+  EncryptedKey key{
+      .key_id = "key-1",
+      .encrypted_key_metadata = "secret-key-metadata",
+      .encrypted_by_id = "kek-1",
+      .properties = {{"scope", "table"}},
+  };
+
+  auto builder = TableMetadataBuilder::BuildFrom(base.get());
+  builder->AddEncryptionKey(key);
+  builder->AddEncryptionKey(key);
+
+  ICEBERG_UNWRAP_OR_FAIL(auto metadata, builder->Build());
+  ASSERT_EQ(metadata->encryption_keys.size(), 1);
+  EXPECT_EQ(metadata->encryption_keys[0], key);
+  ASSERT_EQ(builder->changes().size(), 1);
+  EXPECT_EQ(builder->changes()[0]->kind(), TableUpdate::Kind::kAddEncryptionKey);
+
+  builder = TableMetadataBuilder::BuildFrom(metadata.get());
+  builder->RemoveEncryptionKey("missing-key");
+  ICEBERG_UNWRAP_OR_FAIL(auto unchanged, builder->Build());
+  ASSERT_EQ(unchanged->encryption_keys.size(), 1);
+  EXPECT_EQ(unchanged->encryption_keys[0], key);
+  EXPECT_TRUE(builder->changes().empty());
+
+  builder = TableMetadataBuilder::BuildFrom(metadata.get());
+  builder->RemoveEncryptionKey("key-1");
+  ICEBERG_UNWRAP_OR_FAIL(auto removed, builder->Build());
+  EXPECT_TRUE(removed->encryption_keys.empty());
+  ASSERT_EQ(builder->changes().size(), 1);
+  EXPECT_EQ(builder->changes()[0]->kind(), TableUpdate::Kind::kRemoveEncryptionKey);
 }
 
 TEST(TableMetadataBuilderTest, UpgradeFormatVersion) {
@@ -1154,6 +1192,39 @@ TEST(TableMetadataBuilderTest, RemoveSnapshotRef) {
   ICEBERG_UNWRAP_OR_FAIL(metadata, builder->Build());
   ASSERT_EQ(metadata->refs.size(), 1);
   EXPECT_TRUE(metadata->refs.contains("ref1"));
+}
+
+TEST(TableMetadataBuilderTest, SetRefRejectsTagForMainBranch) {
+  auto base = CreateBaseMetadata();
+  auto builder = TableMetadataBuilder::BuildFrom(base.get());
+
+  builder->AddSnapshot(std::make_shared<Snapshot>(Snapshot{.snapshot_id = 1}));
+  ICEBERG_UNWRAP_OR_FAIL(auto main_tag, SnapshotRef::MakeTag(1));
+
+  builder->SetRef(std::string(SnapshotRef::kMainBranch), std::move(main_tag));
+
+  auto result = builder->Build();
+  ASSERT_THAT(result, IsError(ErrorKind::kValidationFailed));
+  EXPECT_THAT(result, HasErrorMessage("Cannot set main to a tag, it must be a branch"));
+}
+
+TEST(TableMetadataBuilderTest, SetMainRefToAddedSnapshotUsesSnapshotTimestampForLog) {
+  auto base = CreateBaseMetadata();
+  auto builder = TableMetadataBuilder::BuildFrom(base.get());
+
+  auto snapshot_time = TimePointMsFromUnixMs(123456789);
+  builder->AddSnapshot(std::make_shared<Snapshot>(
+      Snapshot{.snapshot_id = 1, .sequence_number = 1, .timestamp_ms = snapshot_time}));
+  ICEBERG_UNWRAP_OR_FAIL(auto main_branch, SnapshotRef::MakeBranch(1));
+
+  builder->SetRef(std::string(SnapshotRef::kMainBranch), std::move(main_branch));
+
+  ICEBERG_UNWRAP_OR_FAIL(auto metadata, builder->Build());
+  EXPECT_EQ(metadata->current_snapshot_id, 1);
+  EXPECT_NE(metadata->last_updated_ms, snapshot_time);
+  ASSERT_FALSE(metadata->snapshot_log.empty());
+  EXPECT_EQ(metadata->snapshot_log.back().snapshot_id, 1);
+  EXPECT_EQ(metadata->snapshot_log.back().timestamp_ms, snapshot_time);
 }
 
 TEST(TableMetadataBuilderTest, RemoveSnapshot) {

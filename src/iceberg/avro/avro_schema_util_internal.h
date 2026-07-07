@@ -52,10 +52,16 @@ class ToAvroNodeVisitor {
   Status Visit(const TimeType& type, ::avro::NodePtr* node);
   Status Visit(const TimestampType& type, ::avro::NodePtr* node);
   Status Visit(const TimestampTzType& type, ::avro::NodePtr* node);
+  Status Visit(const TimestampNsType& type, ::avro::NodePtr* node);
+  Status Visit(const TimestampTzNsType& type, ::avro::NodePtr* node);
   Status Visit(const StringType& type, ::avro::NodePtr* node);
   Status Visit(const UuidType& type, ::avro::NodePtr* node);
   Status Visit(const FixedType& type, ::avro::NodePtr* node);
   Status Visit(const BinaryType& type, ::avro::NodePtr* node);
+  Status Visit(const UnknownType&, ::avro::NodePtr*);
+  Status Visit(const VariantType&, ::avro::NodePtr*);
+  Status Visit(const GeometryType&, ::avro::NodePtr*);
+  Status Visit(const GeographyType&, ::avro::NodePtr*);
   Status Visit(const StructType& type, ::avro::NodePtr* node);
   Status Visit(const ListType& type, ::avro::NodePtr* node);
   Status Visit(const MapType& type, ::avro::NodePtr* node);
@@ -143,6 +149,14 @@ Result<SchemaProjection> Project(const Schema& expected_schema,
 std::string ToString(const ::avro::NodePtr& node);
 std::string ToString(const ::avro::LogicalType& logical_type);
 std::string ToString(const ::avro::LogicalType::Type& logical_type);
+
+/// \brief Check if an Avro node can be read as an Iceberg date.
+///
+/// Iceberg dates are encoded as Avro ints with the date logical type. Readers
+/// also accept plain ints where the expected Iceberg type is date.
+/// \param node The Avro node to check.
+/// \return True if the node is an Avro date or a plain Avro int.
+bool IsAvroDateOrPlainInt(const ::avro::NodePtr& node);
 
 /// \brief Check if an Avro node has a map logical type.
 /// \param node The Avro node to check.

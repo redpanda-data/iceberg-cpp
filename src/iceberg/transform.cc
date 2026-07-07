@@ -28,10 +28,12 @@
 #include "iceberg/result.h"
 #include "iceberg/transform_function.h"
 #include "iceberg/type.h"
+#include "iceberg/util/base64.h"
 #include "iceberg/util/checked_cast.h"
 #include "iceberg/util/macros.h"
 #include "iceberg/util/projection_util_internal.h"
 #include "iceberg/util/string_util.h"
+#include "iceberg/util/temporal_util.h"
 #include "iceberg/util/transform_util.h"
 
 namespace iceberg {
@@ -133,10 +135,32 @@ Result<std::shared_ptr<TransformFunction>> Transform::Bind(
   }
 }
 
+std::shared_ptr<Type> Transform::ResultType(
+    const std::shared_ptr<Type>& source_type) const {
+  switch (transform_type_) {
+    case TransformType::kIdentity:
+    case TransformType::kTruncate:
+    case TransformType::kVoid:
+      return source_type;
+    case TransformType::kBucket:
+    case TransformType::kYear:
+    case TransformType::kMonth:
+    case TransformType::kHour:
+      return int32();
+    case TransformType::kDay:
+      return date();
+    case TransformType::kUnknown:
+      return string();
+  }
+  std::unreachable();
+}
+
 bool Transform::CanTransform(const Type& source_type) const {
   switch (transform_type_) {
     case TransformType::kIdentity:
-      if (!source_type.is_primitive()) [[unlikely]] {
+      if (source_type.is_variant() || source_type.type_id() == TypeId::kGeometry ||
+          source_type.type_id() == TypeId::kGeography || !source_type.is_primitive())
+          [[unlikely]] {
         return false;
       }
       return true;
@@ -152,6 +176,8 @@ bool Transform::CanTransform(const Type& source_type) const {
         case TypeId::kTime:
         case TypeId::kTimestamp:
         case TypeId::kTimestampTz:
+        case TypeId::kTimestampNs:
+        case TypeId::kTimestampTzNs:
         case TypeId::kString:
         case TypeId::kUuid:
         case TypeId::kFixed:
@@ -177,6 +203,8 @@ bool Transform::CanTransform(const Type& source_type) const {
         case TypeId::kDate:
         case TypeId::kTimestamp:
         case TypeId::kTimestampTz:
+        case TypeId::kTimestampNs:
+        case TypeId::kTimestampTzNs:
           return true;
         default:
           return false;
@@ -186,6 +214,8 @@ bool Transform::CanTransform(const Type& source_type) const {
         case TypeId::kDate:
         case TypeId::kTimestamp:
         case TypeId::kTimestampTz:
+        case TypeId::kTimestampNs:
+        case TypeId::kTimestampTzNs:
           return true;
         default:
           return false;
@@ -194,6 +224,8 @@ bool Transform::CanTransform(const Type& source_type) const {
       switch (source_type.type_id()) {
         case TypeId::kTimestamp:
         case TypeId::kTimestampTz:
+        case TypeId::kTimestampNs:
+        case TypeId::kTimestampTzNs:
           return true;
         default:
           return false;
@@ -420,10 +452,15 @@ Result<std::string> Transform::ToHumanString(const Literal& value) {
           return TransformUtil::HumanTimestamp(std::get<int64_t>(value.value()));
         case TypeId::kTimestampTz:
           return TransformUtil::HumanTimestampWithZone(std::get<int64_t>(value.value()));
+        case TypeId::kTimestampNs:
+          return TransformUtil::HumanTimestampNs(std::get<int64_t>(value.value()));
+        case TypeId::kTimestampTzNs:
+          return TransformUtil::HumanTimestampNsWithZone(
+              std::get<int64_t>(value.value()));
         case TypeId::kFixed:
         case TypeId::kBinary: {
           const auto& binary_data = std::get<std::vector<uint8_t>>(value.value());
-          return TransformUtil::Base64Encode(
+          return Base64::Encode(
               {reinterpret_cast<const char*>(binary_data.data()), binary_data.size()});
         }
         case TypeId::kDecimal: {

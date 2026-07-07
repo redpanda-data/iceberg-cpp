@@ -1,0 +1,155 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+name: SQL Catalog Tests
+
+on:
+  push:
+    branches:
+      - '**'
+      - '!dependabot/**'
+    tags:
+      - '**'
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: ${{ github.repository }}-${{ github.head_ref || github.sha }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  ICEBERG_HOME: /tmp/iceberg
+
+jobs:
+  sql-catalog:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    name: SQL Catalog (${{ matrix.title }})
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - title: AMD64 Ubuntu 26.04
+            runs-on: ubuntu-26.04
+            CC: gcc-14
+            CXX: g++-14
+            cmake_build_type: Debug
+            cmake_extra_args: ""
+          - title: AArch64 macOS 26
+            runs-on: macos-26
+            cmake_build_type: Debug
+            cmake_extra_args: ""
+          - title: AMD64 Windows 2025
+            runs-on: windows-2025
+            cmake_build_type: Release
+            cmake_extra_args: -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
+    env:
+      SCCACHE_DIR: ${{ github.workspace }}/.sccache
+      SCCACHE_CACHE_SIZE: "2G"
+    steps:
+      - name: Checkout iceberg-cpp
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up MSVC Developer Command Prompt
+        if: ${{ startsWith(matrix.runs-on, 'windows') }}
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: x64
+      # GitHub patches the Windows image roughly weekly via gradual rollouts, so
+      # back-to-back runs can hit different cl.exe builds. sccache keys on the compiler,
+      # so a shared key would miss after each bump; the version keeps caches separate.
+      # Non-Windows legs get an empty suffix, leaving their keys unchanged.
+      - name: Resolve MSVC version for sccache key
+        if: ${{ startsWith(matrix.runs-on, 'windows') }}
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $banner = (cl.exe 2>&1 | Out-String)
+          if ($banner -match 'Version ([\d.]+)') {
+            $suffix = "-$($Matches[1])"
+          } else {
+            # The key is only a cache hint, so degrade to a shared bucket rather than
+            # fail the build; the warning flags that the parse needs fixing.
+            $suffix = '-unknown'
+            Write-Host "::warning::could not parse cl.exe version for sccache key, using '$suffix'; banner was: $banner"
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "SCCACHE_KEY_SUFFIX=$suffix"
+          Write-Host "SCCACHE_KEY_SUFFIX=$suffix"
+      - name: Install dependencies on Ubuntu
+        if: ${{ startsWith(matrix.runs-on, 'ubuntu') }}
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+      - name: Set Ubuntu Compilers
+        if: ${{ startsWith(matrix.runs-on, 'ubuntu') }}
+        run: |
+          echo "CC=${{ matrix.CC }}" >> $GITHUB_ENV
+          echo "CXX=${{ matrix.CXX }}" >> $GITHUB_ENV
+      - name: Cache vcpkg packages
+        if: ${{ startsWith(matrix.runs-on, 'windows') }}
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        id: vcpkg-cache
+        with:
+          path: C:/vcpkg/installed
+          key: vcpkg-x64-windows-sql-catalog-${{ hashFiles('.github/workflows/sql_catalog_test.yml') }}
+      - name: Install dependencies on Windows
+        if: ${{ startsWith(matrix.runs-on, 'windows') && steps.vcpkg-cache.outputs.cache-hit != 'true' }}
+        shell: pwsh
+        run: |
+          vcpkg install zlib:x64-windows nlohmann-json:x64-windows nanoarrow:x64-windows roaring:x64-windows sqlite3:x64-windows
+      - name: Restore sccache cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ github.workspace }}/.sccache
+          key: sccache-sqlcatalog-${{ matrix.runs-on }}${{ env.SCCACHE_KEY_SUFFIX }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-sqlcatalog-${{ matrix.runs-on }}${{ env.SCCACHE_KEY_SUFFIX }}-
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+      - name: Configure Iceberg
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_INSTALL_PREFIX="${ICEBERG_HOME}" \
+            -DCMAKE_BUILD_TYPE=${{ matrix.cmake_build_type }} \
+            -DICEBERG_BUILD_STATIC=ON \
+            -DICEBERG_BUILD_SHARED=ON \
+            -DICEBERG_BUILD_REST=OFF \
+            -DICEBERG_BUILD_SQL_CATALOG=ON \
+            -DICEBERG_SQL_SQLITE=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
+            ${{ matrix.cmake_extra_args }}
+      - name: Build SQL catalog tests
+        shell: bash
+        run: cmake --build build --target sql_catalog_test
+      - name: Show sccache stats
+        shell: bash
+        run: sccache --show-stats
+      - name: Save sccache cache
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ github.workspace }}/.sccache
+          key: sccache-sqlcatalog-${{ matrix.runs-on }}${{ env.SCCACHE_KEY_SUFFIX }}-${{ github.run_id }}
+      - name: Run SQL catalog tests
+        shell: bash
+        run: ctest --test-dir build -R '^sql_catalog_test$' --output-on-failure -C ${{ matrix.cmake_build_type }}

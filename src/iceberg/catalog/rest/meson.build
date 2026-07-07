@@ -21,6 +21,7 @@ iceberg_rest_sources = files(
     'auth/auth_properties.cc',
     'auth/auth_session.cc',
     'auth/oauth2_util.cc',
+    'auth/token_refresh_scheduler.cc',
     'catalog_properties.cc',
     'endpoint.cc',
     'error_handlers.cc',
@@ -28,6 +29,7 @@ iceberg_rest_sources = files(
     'json_serde.cc',
     'resource_paths.cc',
     'rest_catalog.cc',
+    'rest_file_io.cc',
     'rest_util.cc',
     'types.cc',
 )
@@ -39,17 +41,36 @@ cpr_needs_static = (
 )
 cpr_dep = dependency('cpr', static: cpr_needs_static)
 
+iceberg_rest_sources += files('auth/sigv4_manager.cc')
 iceberg_rest_build_deps = [iceberg_dep, cpr_dep]
+iceberg_rest_compile_defs = []
+
+sigv4_opt = get_option('sigv4')
+# Use the CMake config, not pkg-config: aws-cpp-sdk-core.pc Cflags force
+# -std=c++11 -fno-exceptions, which would override the project's C++23 build.
+aws_sdk_core_dep = dependency(
+    'aws-cpp-sdk-core',
+    method: 'cmake',
+    modules: ['aws-cpp-sdk-core'],
+    required: sigv4_opt,
+)
+if aws_sdk_core_dep.found()
+    iceberg_rest_build_deps += aws_sdk_core_dep
+    iceberg_rest_compile_defs += '-DICEBERG_SIGV4_ENABLED=1'
+else
+    iceberg_rest_compile_defs += '-DICEBERG_SIGV4_ENABLED=0'
+endif
+
 iceberg_rest_lib = library(
     'iceberg_rest',
     sources: iceberg_rest_sources,
     dependencies: iceberg_rest_build_deps,
     gnu_symbol_visibility: 'hidden',
-    cpp_shared_args: ['-DICEBERG_REST_EXPORTING'],
-    cpp_static_args: ['-DICEBERG_REST_STATIC'],
+    cpp_shared_args: ['-DICEBERG_REST_EXPORTING'] + iceberg_rest_compile_defs,
+    cpp_static_args: ['-DICEBERG_REST_STATIC'] + iceberg_rest_compile_defs,
 )
 
-iceberg_rest_compile_args = []
+iceberg_rest_compile_args = iceberg_rest_compile_defs
 if get_option('default_library') == 'static'
     iceberg_rest_compile_args += ['-DICEBERG_REST_STATIC']
 endif
@@ -68,9 +89,11 @@ install_headers(
         'endpoint.h',
         'error_handlers.h',
         'http_client.h',
+        'http_request.h',
         'iceberg_rest_export.h',
         'resource_paths.h',
         'rest_catalog.h',
+        'rest_file_io.h',
         'rest_util.h',
         'type_fwd.h',
         'types.h',
@@ -78,13 +101,4 @@ install_headers(
     subdir: 'iceberg/catalog/rest',
 )
 
-install_headers(
-    [
-        'auth/auth_manager.h',
-        'auth/auth_managers.h',
-        'auth/auth_properties.h',
-        'auth/auth_session.h',
-        'auth/oauth2_util.h',
-    ],
-    subdir: 'iceberg/catalog/rest/auth',
-)
+subdir('auth')

@@ -29,7 +29,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "iceberg/arrow/arrow_file_io.h"
+#include "iceberg/arrow/arrow_io_util.h"
 #include "iceberg/avro/avro_register.h"
 #include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/manifest/manifest_list.h"
@@ -212,8 +212,9 @@ class DeleteFileIndexTest : public testing::TestWithParam<int8_t> {
   // Helper to extract paths from delete files for comparison
   static std::vector<std::string> GetPaths(
       const std::vector<std::shared_ptr<DataFile>>& files) {
-    return std::ranges::to<std::vector<std::string>>(
-        std::ranges::transform_view(files, [](const auto& f) { return f->file_path; }));
+    return std::ranges::transform_view(files,
+                                       [](const auto& f) { return f->file_path; }) |
+           std::ranges::to<std::vector<std::string>>();
   }
 };
 

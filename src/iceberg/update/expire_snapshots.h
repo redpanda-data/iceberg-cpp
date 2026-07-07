@@ -22,6 +22,9 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -29,6 +32,7 @@
 #include "iceberg/result.h"
 #include "iceberg/type_fwd.h"
 #include "iceberg/update/pending_update.h"
+#include "iceberg/util/executor.h"
 #include "iceberg/util/timepoint.h"
 
 /// \file iceberg/update/expire_snapshots.h
@@ -73,6 +77,7 @@ class ICEBERG_EXPORT ExpireSnapshots : public PendingUpdate {
     std::vector<int64_t> snapshot_ids_to_remove;
     std::vector<int32_t> partition_spec_ids_to_remove;
     std::unordered_set<int32_t> schema_ids_to_remove;
+    std::shared_ptr<const TableMetadata> metadata_before_expiration;
   };
 
   /// \brief Expires a specific Snapshot identified by id.
@@ -111,9 +116,17 @@ class ICEBERG_EXPORT ExpireSnapshots : public PendingUpdate {
   /// If this method is not called, unnecessary manifests and data files will still be
   /// deleted.
   ///
+  /// \note With ExecuteDeleteWith(), callbacks may run concurrently.
+  ///
   /// \param delete_func A function that will be called to delete manifests and data files
   /// \return Reference to this for method chaining.
   ExpireSnapshots& DeleteWith(std::function<void(const std::string&)> delete_func);
+
+  /// \brief Configure an executor for planning expired snapshot metadata.
+  ///
+  /// \param executor Executor to use while planning expired snapshot metadata.
+  /// \return Reference to this for method chaining.
+  ExpireSnapshots& PlanWith(Executor& executor);
 
   /// \brief Configures the cleanup level for expired files.
   ///
@@ -136,11 +149,29 @@ class ICEBERG_EXPORT ExpireSnapshots : public PendingUpdate {
   /// \return Reference to this for method chaining.
   ExpireSnapshots& CleanExpiredMetadata(bool clean);
 
+  /// \brief Configure an executor for DeleteWith() callbacks.
+  ///
+  /// \param executor An executor reference.
+  /// \return Reference to this for method chaining.
+  ExpireSnapshots& ExecuteDeleteWith(Executor& executor);
+
   Kind kind() const final { return Kind::kExpireSnapshots; }
+  bool IsRetryable() const override { return true; }
 
   /// \brief Apply the pending changes and return the results
   /// \return The results of changes
   Result<ApplyResult> Apply();
+
+  /// \brief Finalize the expire snapshots update, cleaning up expired files.
+  ///
+  /// After a successful commit, this method deletes manifest files, manifest lists,
+  /// data files, and statistics files that are no longer referenced by any valid
+  /// snapshot. The cleanup behavior is controlled by the CleanupLevel setting.
+  ///
+  /// \param commit_result The committed table metadata when the commit succeeds, or the
+  /// commit error when it fails.
+  /// \return Status indicating success or failure
+  Status Finalize(Result<const TableMetadata*> commit_result) override;
 
  private:
   explicit ExpireSnapshots(std::shared_ptr<TransactionContext> ctx);
@@ -159,7 +190,6 @@ class ICEBERG_EXPORT ExpireSnapshots : public PendingUpdate {
   Result<std::unordered_set<int64_t>> UnreferencedSnapshotIdsToRetain(
       const SnapshotToRef& refs) const;
 
- private:
   const TimePointMs current_time_ms_;
   const int64_t default_max_ref_age_ms_;
   int32_t default_min_num_snapshots_;
@@ -167,8 +197,13 @@ class ICEBERG_EXPORT ExpireSnapshots : public PendingUpdate {
   std::function<void(const std::string&)> delete_func_;
   std::vector<int64_t> snapshot_ids_to_expire_;
   enum CleanupLevel cleanup_level_ { CleanupLevel::kAll };
+  OptionalExecutor plan_executor_;
   bool clean_expired_metadata_{false};
   bool specified_snapshot_id_{false};
+  OptionalExecutor delete_executor_;
+
+  /// Cached result from Apply(), consumed by Finalize() and cleared after use.
+  std::optional<ApplyResult> apply_result_;
 };
 
 }  // namespace iceberg

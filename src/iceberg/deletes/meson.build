@@ -16,6 +16,10 @@
 # under the License.
 
 install_headers(
-    ['position_delete_index.h', 'roaring_position_bitmap.h'],
+    [
+        'position_delete_index.h',
+        'position_delete_range_consumer.h',
+        'roaring_position_bitmap.h',
+    ],
     subdir: 'iceberg/deletes',
 )

@@ -181,6 +181,12 @@ class ApplyChangesVisitor {
     return base_type;
   }
 
+  Result<std::shared_ptr<Type>> VisitVariant(const VariantType& variant_type,
+                                             const std::shared_ptr<Type>& base_type,
+                                             int32_t parent_id) {
+    return base_type;
+  }
+
  private:
   Result<std::optional<SchemaField>> ProcessField(
       const SchemaField& field, const std::shared_ptr<Type>& field_type_result) {
@@ -542,7 +548,7 @@ UpdateSchema& UpdateSchema::UnionByNameWith(std::shared_ptr<Schema> new_schema) 
 
 UpdateSchema& UpdateSchema::SetIdentifierFields(
     const std::span<std::string_view>& names) {
-  identifier_field_names_ = std::ranges::to<std::vector<std::string>>(names);
+  identifier_field_names_ = names | std::ranges::to<std::vector<std::string>>();
   return *this;
 }
 
@@ -589,10 +595,11 @@ Result<UpdateSchema::ApplyResult> UpdateSchema::Apply() {
     fresh_identifier_ids.push_back(field_opt->get().field_id());
   }
 
-  auto new_fields = std::ranges::to<std::vector<SchemaField>>(temp_schema->fields());
+  auto new_fields = temp_schema->fields() | std::ranges::to<std::vector<SchemaField>>();
   ICEBERG_ASSIGN_OR_RAISE(
       auto new_schema,
       Schema::Make(std::move(new_fields), schema_->schema_id(), fresh_identifier_ids));
+  ICEBERG_RETURN_UNEXPECTED(new_schema->Validate(base().format_version));
 
   std::unordered_map<std::string, std::string> updated_props;
   const auto& base_metadata = base();

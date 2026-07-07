@@ -52,6 +52,11 @@ struct ICEBERG_EXPORT MetricsMode {
 
   Kind kind;
   std::variant<std::monostate, int32_t> length;
+
+  /// \brief Get the truncate length from this MetricsMode.
+  /// \return 0 for None/Counts modes, the truncate length for Truncate mode,
+  ///         or INT_MAX for Full mode.
+  int32_t TruncateLength() const;
 };
 
 /// \brief Configuration for collecting column metrics for an Iceberg table.
@@ -62,6 +67,12 @@ class ICEBERG_EXPORT MetricsConfig {
 
   /// \brief Creates a metrics config from a table.
   static Result<std::shared_ptr<MetricsConfig>> Make(const Table& table);
+
+  /// \brief Creates a metrics config from properties (for testing)
+  /// \param properties Map of property key-value pairs
+  /// \return A shared pointer to the created MetricsConfig
+  static Result<std::shared_ptr<MetricsConfig>> Make(
+      std::unordered_map<std::string, std::string> properties);
 
   /// \brief Get `limit` num of primitive field ids from schema
   static Result<std::unordered_set<int32_t>> LimitFieldIds(const Schema& schema,
@@ -90,12 +101,14 @@ class ICEBERG_EXPORT MetricsConfig {
   ///
   /// \param props will be read for metrics overrides (write.metadata.metrics.column.*)
   /// and default(write.metadata.metrics.default)
-  /// \param schema table schema
-  /// \param order sort order columns, will be promoted to truncate(16)
+  /// \param schema table schema, or nullptr when only properties are available
+  /// \param order table sort order, or nullptr when unavailable. If provided, sorted
+  /// columns use at least the default truncate metrics mode (`truncate(16)`) when
+  /// the default mode is `none` or `counts`; explicit column overrides still win.
   /// \return metrics configuration
   static Result<std::shared_ptr<MetricsConfig>> MakeInternal(const TableProperties& props,
-                                                             const Schema& schema,
-                                                             const SortOrder& order);
+                                                             const Schema* schema,
+                                                             const SortOrder* order);
 
   ColumnModeMap column_modes_;
   MetricsMode default_mode_;

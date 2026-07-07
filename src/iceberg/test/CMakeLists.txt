@@ -15,6 +15,12 @@
 # specific language governing permissions and limitations
 # under the License.
 
+set(CMAKE_COMPILE_WARNING_AS_ERROR FALSE)
+
+set(INSTALL_GTEST
+    OFF
+    CACHE BOOL "" FORCE)
+
 fetchcontent_declare(googletest
                      GIT_REPOSITORY https://github.com/google/googletest.git
                      GIT_TAG b514bdc898e2951020cbdca1304b75f5950d1f59 # release-1.15.2
@@ -29,7 +35,7 @@ set(ICEBERG_TEST_RESOURCES "${CMAKE_SOURCE_DIR}/src/iceberg/test/resources")
 configure_file("test_config.h.in" "test_config.h")
 
 function(add_iceberg_test test_name)
-  set(options USE_BUNDLE)
+  set(options USE_BUNDLE USE_DATA)
   set(oneValueArgs)
   set(multiValueArgs SOURCES)
   cmake_parse_arguments(ARG
@@ -44,9 +50,17 @@ function(add_iceberg_test test_name)
   target_sources(${test_name} PRIVATE ${ARG_SOURCES})
 
   if(ARG_USE_BUNDLE)
-    target_link_libraries(${test_name} PRIVATE iceberg_bundle_static GTest::gmock_main)
+    target_link_libraries(${test_name}
+                          PRIVATE "$<IF:$<TARGET_EXISTS:iceberg_bundle_static>,iceberg_bundle_static,iceberg_bundle_shared>"
+                                  GTest::gmock_main)
+  elseif(ARG_USE_DATA)
+    target_link_libraries(${test_name}
+                          PRIVATE "$<IF:$<TARGET_EXISTS:iceberg_data_static>,iceberg_data_static,iceberg_data_shared>"
+                                  GTest::gmock_main)
   else()
-    target_link_libraries(${test_name} PRIVATE iceberg_static GTest::gmock_main)
+    target_link_libraries(${test_name}
+                          PRIVATE "$<IF:$<TARGET_EXISTS:iceberg_static>,iceberg_static,iceberg_shared>"
+                                  GTest::gmock_main)
   endif()
 
   if(MSVC_TOOLCHAIN)
@@ -76,6 +90,8 @@ add_iceberg_test(table_test
                  SOURCES
                  location_provider_test.cc
                  metrics_config_test.cc
+                 metrics_reporter_test.cc
+                 metrics_test.cc
                  snapshot_summary_builder_test.cc
                  snapshot_test.cc
                  snapshot_util_test.cc
@@ -84,6 +100,12 @@ add_iceberg_test(table_test
                  table_requirements_test.cc
                  table_test.cc
                  table_update_test.cc)
+
+add_iceberg_test(logging_test
+                 SOURCES
+                 cerr_logger_test.cc
+                 log_level_test.cc
+                 logger_test.cc)
 
 add_iceberg_test(expression_test
                  SOURCES
@@ -107,25 +129,40 @@ add_iceberg_test(json_serde_test
                  schema_json_test.cc)
 
 add_iceberg_test(util_test
+                 USE_DATA
                  SOURCES
+                 base64_test.cc
                  bucket_util_test.cc
                  config_test.cc
                  data_file_set_test.cc
                  decimal_test.cc
                  endian_test.cc
+                 file_io_test.cc
                  formatter_test.cc
+                 lazy_test.cc
                  location_util_test.cc
+                 math_util_internal_test.cc
+                 executor_util_test.cc
                  roaring_position_bitmap_test.cc
                  position_delete_index_test.cc
+                 position_delete_range_consumer_test.cc
+                 retry_util_test.cc
                  string_util_test.cc
                  struct_like_set_test.cc
+                 task_group_test.cc
+                 temporal_util_test.cc
                  transform_util_test.cc
                  truncate_util_test.cc
                  url_encoder_test.cc
                  uuid_test.cc
                  visit_type_test.cc)
 
-add_iceberg_test(roaring_test SOURCES roaring_test.cc)
+add_iceberg_test(puffin_test
+                 USE_DATA
+                 SOURCES
+                 puffin_format_test.cc
+                 puffin_json_test.cc
+                 puffin_reader_writer_test.cc)
 
 if(ICEBERG_BUILD_BUNDLE)
   add_iceberg_test(avro_test
@@ -139,13 +176,19 @@ if(ICEBERG_BUILD_BUNDLE)
   add_iceberg_test(arrow_test
                    USE_BUNDLE
                    SOURCES
-                   arrow_fs_file_io_test.cc
+                   arrow_io_test.cc
                    arrow_test.cc
                    gzip_decompress_test.cc
                    metadata_io_test.cc
                    struct_like_test.cc)
 
+  if(ICEBERG_S3)
+    add_iceberg_test(file_io_test USE_BUNDLE SOURCES arrow_s3_file_io_test.cc)
+  endif()
+
   add_iceberg_test(catalog_test USE_BUNDLE SOURCES in_memory_catalog_test.cc)
+
+  add_iceberg_test(metadata_table_test USE_BUNDLE SOURCES metadata_table_test.cc)
 
   add_iceberg_test(eval_expr_test
                    USE_BUNDLE
@@ -159,6 +202,7 @@ if(ICEBERG_BUILD_BUNDLE)
                    delete_file_index_test.cc
                    manifest_group_test.cc
                    manifest_list_versions_test.cc
+                   manifest_merge_manager_test.cc
                    manifest_reader_stats_test.cc
                    manifest_reader_test.cc
                    manifest_writer_versions_test.cc
@@ -167,7 +211,9 @@ if(ICEBERG_BUILD_BUNDLE)
   add_iceberg_test(parquet_test
                    USE_BUNDLE
                    SOURCES
+                   metrics_test_base.cc
                    parquet_data_test.cc
+                   parquet_metrics_test.cc
                    parquet_schema_test.cc
                    parquet_test.cc)
 
@@ -176,14 +222,21 @@ if(ICEBERG_BUILD_BUNDLE)
                    SOURCES
                    file_scan_task_test.cc
                    incremental_append_scan_test.cc
+                   incremental_changelog_scan_test.cc
                    table_scan_test.cc)
 
   add_iceberg_test(table_update_test
                    USE_BUNDLE
                    SOURCES
+                   delete_files_test.cc
                    expire_snapshots_test.cc
                    fast_append_test.cc
+                   manifest_filter_manager_test.cc
+                   merge_append_test.cc
+                   merging_snapshot_update_test.cc
                    name_mapping_update_test.cc
+                   rewrite_files_test.cc
+                   row_delta_test.cc
                    snapshot_manager_test.cc
                    transaction_test.cc
                    update_location_test.cc
@@ -192,14 +245,35 @@ if(ICEBERG_BUILD_BUNDLE)
                    update_properties_test.cc
                    update_schema_test.cc
                    update_sort_order_test.cc
-                   update_statistics_test.cc)
+                   update_statistics_test.cc
+                   overwrite_files_test.cc)
 
   add_iceberg_test(data_test
                    USE_BUNDLE
                    SOURCES
+                   arrow_c_data_util_test.cc
+                   arrow_row_builder_test.cc
                    data_writer_test.cc
-                   delete_loader_test.cc)
+                   delete_filter_test.cc
+                   delete_loader_test.cc
+                   file_scan_task_reader_test.cc)
 
+endif()
+
+if(ICEBERG_BUILD_SQL_CATALOG
+   AND ICEBERG_SQL_SQLITE
+   AND ICEBERG_BUILD_BUNDLE)
+  add_executable(sql_catalog_test)
+  target_include_directories(sql_catalog_test PRIVATE "${CMAKE_BINARY_DIR}/iceberg/test/")
+  target_sources(sql_catalog_test PRIVATE sql_catalog_test.cc)
+  target_link_libraries(sql_catalog_test
+                        PRIVATE iceberg_sql_catalog_static
+                                "$<IF:$<TARGET_EXISTS:iceberg_bundle_static>,iceberg_bundle_static,iceberg_bundle_shared>"
+                                GTest::gmock_main)
+  if(MSVC_TOOLCHAIN)
+    target_compile_options(sql_catalog_test PRIVATE /bigobj)
+  endif()
+  add_test(NAME sql_catalog_test COMMAND sql_catalog_test)
 endif()
 
 if(ICEBERG_BUILD_REST)
@@ -223,15 +297,19 @@ if(ICEBERG_BUILD_REST)
     add_test(NAME ${test_name} COMMAND ${test_name})
   endfunction()
 
-  set(ICEBERG_REST_TEST_SOURCES auth_manager_test.cc endpoint_test.cc
-                                rest_json_serde_test.cc rest_util_test.cc)
-  if(ICEBERG_REST_HAVE_SIGV4)
-    list(APPEND ICEBERG_REST_TEST_SOURCES sigv4_signer_test.cc)
-  endif()
+  add_rest_iceberg_test(rest_catalog_test
+                        SOURCES
+                        auth_manager_test.cc
+                        error_handlers_test.cc
+                        endpoint_test.cc
+                        rest_file_io_test.cc
+                        rest_json_serde_test.cc
+                        rest_util_test.cc
+                        http_client_ssl_test.cc)
 
-  add_rest_iceberg_test(rest_catalog_test SOURCES ${ICEBERG_REST_TEST_SOURCES})
-  if(ICEBERG_REST_HAVE_SIGV4)
-    target_compile_definitions(rest_catalog_test PRIVATE ICEBERG_REST_WITH_SIGV4)
+  if(ICEBERG_SIGV4)
+    add_rest_iceberg_test(sigv4_auth_test SOURCES sigv4_auth_test.cc)
+    target_link_libraries(sigv4_auth_test PRIVATE aws-cpp-sdk-core)
   endif()
 
   if(ICEBERG_BUILD_REST_INTEGRATION_TESTS)

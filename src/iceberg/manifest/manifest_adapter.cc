@@ -126,7 +126,6 @@ Status ManifestAdapter::StartAppending() {
     return InvalidArgument("Adapter buffer not empty, cannot start appending.");
   }
   array_ = {};
-  size_ = 0;
   ArrowError error;
   ICEBERG_NANOARROW_RETURN_UNEXPECTED_WITH_ERROR(
       ArrowArrayInitFromSchema(&array_, &schema_, &error), error);
@@ -138,6 +137,7 @@ Result<ArrowArray*> ManifestAdapter::FinishAppending() {
   ArrowError error;
   ICEBERG_NANOARROW_RETURN_UNEXPECTED_WITH_ERROR(
       ArrowArrayFinishBuildingDefault(&array_, &error), error);
+  size_ = 0;
   return &array_;
 }
 
@@ -222,6 +222,8 @@ Status ManifestEntryAdapter::AppendPartitionValues(
       case TypeId::kTime:
       case TypeId::kTimestamp:
       case TypeId::kTimestampTz:
+      case TypeId::kTimestampNs:
+      case TypeId::kTimestampTzNs:
         ICEBERG_RETURN_UNEXPECTED(
             AppendField(child_array, std::get<int64_t>(partition_value.value())));
         break;
