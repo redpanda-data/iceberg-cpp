@@ -46,6 +46,7 @@
 #include "iceberg/schema.h"
 #include "iceberg/sort_order.h"
 #include "iceberg/table.h"
+#include "iceberg/table_metadata.h"
 #include "iceberg/table_requirement.h"
 #include "iceberg/table_requirements.h"
 #include "iceberg/table_update.h"
@@ -747,6 +748,12 @@ Result<std::shared_ptr<Transaction>> RestCatalog::StageCreateTable(
   auto storage_credentials = std::move(result.storage_credentials);
   ICEBERG_ASSIGN_OR_RAISE(auto table_io,
                           TableFileIO(context, table_config, storage_credentials));
+  if (!result.metadata) {
+    // The inline metadata was unusable (e.g. AWS Glue omits "schemas");
+    // load the complete metadata file pointed to by metadata-location.
+    ICEBERG_ASSIGN_OR_RAISE(result.metadata,
+                            TableMetadataUtil::Read(*table_io, result.metadata_location));
+  }
   ICEBERG_ASSIGN_OR_RAISE(
       auto table_session,
       TableAuthSession(identifier, table_config, std::move(contextual_session)));
@@ -863,6 +870,12 @@ Result<std::shared_ptr<Table>> RestCatalog::MakeTableFromLoadResult(
   auto storage_credentials = std::move(result.storage_credentials);
   ICEBERG_ASSIGN_OR_RAISE(auto table_io,
                           TableFileIO(context, table_config, storage_credentials));
+  if (!result.metadata) {
+    // The inline metadata was unusable (e.g. AWS Glue omits "schemas");
+    // load the complete metadata file pointed to by metadata-location.
+    ICEBERG_ASSIGN_OR_RAISE(result.metadata,
+                            TableMetadataUtil::Read(*table_io, result.metadata_location));
+  }
   ICEBERG_ASSIGN_OR_RAISE(
       auto table_session,
       TableAuthSession(identifier, table_config, std::move(contextual_session)));
@@ -878,6 +891,13 @@ Result<std::shared_ptr<Table>> RestCatalog::MakeTableFromCommitResponse(
     const SessionContext& context,
     const std::unordered_map<std::string, std::string>& table_config,
     std::shared_ptr<auth::AuthSession> table_session, std::shared_ptr<FileIO> table_io) {
+  if (!response.metadata) {
+    // The inline metadata was unusable (e.g. AWS Glue omits "schemas");
+    // load the complete metadata file pointed to by metadata-location.
+    ICEBERG_ASSIGN_OR_RAISE(
+        response.metadata,
+        TableMetadataUtil::Read(*table_io, response.metadata_location));
+  }
   // Reuse the bound FileIO because commit responses carry no config or credentials.
   auto table_catalog = std::make_shared<TableScopedCatalog>(
       shared_from_this(), context, identifier, table_config, table_session, table_io);

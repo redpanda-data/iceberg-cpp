@@ -1162,7 +1162,17 @@ INSTANTIATE_TEST_SUITE_P(
             .json_str =
                 R"({"metadata":{"format-version":2,"table-uuid":"test-uuid-1234","location":"s3://bucket/test","last-sequence-number":0,"last-updated-ms":0,"last-column-id":1,"schemas":[{"type":"struct","schema-id":1,"fields":[{"id":1,"name":"id","type":"int","required":true}]}],"current-schema-id":1,"partition-specs":[{"spec-id":0,"fields":[]}],"default-spec-id":0,"last-partition-id":0,"sort-orders":[{"order-id":0,"fields":[]}],"default-sort-order-id":0,"properties":{}},"config":{"warehouse":"s3://bucket/warehouse"}})",
             .expected_model = {.metadata = MakeSimpleTableMetadata(),
-                               .config = {{"warehouse", "s3://bucket/warehouse"}}}}),
+                               .config = {{"warehouse", "s3://bucket/warehouse"}}}},
+        // Unusable inline metadata (e.g. AWS Glue returns metadata that is not
+        // an object, or omits required fields). Because a metadata-location is
+        // present, parsing succeeds with null metadata so the catalog can load
+        // the complete metadata file from storage.
+        LoadTableResultDeserializeParam{
+            .test_name = "UnusableInlineMetadata",
+            .json_str =
+                R"({"metadata-location":"s3://bucket/metadata/v1.json","metadata":"invalid"})",
+            .expected_model = {.metadata_location = "s3://bucket/metadata/v1.json",
+                               .metadata = nullptr}}),
     [](const ::testing::TestParamInfo<LoadTableResultDeserializeParam>& info) {
       return info.param.test_name;
     });
@@ -1400,7 +1410,17 @@ INSTANTIATE_TEST_SUITE_P(
             .json_str =
                 R"({"metadata-location":"s3://bucket/metadata/v2.json","metadata":{"format-version":2,"table-uuid":"test-uuid-1234","location":"s3://bucket/test","last-sequence-number":0,"last-updated-ms":0,"last-column-id":1,"schemas":[{"type":"struct","schema-id":1,"fields":[{"id":1,"name":"id","type":"int","required":true}]}],"current-schema-id":1,"partition-specs":[{"spec-id":0,"fields":[]}],"default-spec-id":0,"last-partition-id":0,"sort-orders":[{"order-id":0,"fields":[]}],"default-sort-order-id":0,"properties":{}}})",
             .expected_model = {.metadata_location = "s3://bucket/metadata/v2.json",
-                               .metadata = MakeSimpleTableMetadata()}}),
+                               .metadata = MakeSimpleTableMetadata()}},
+        // Unusable inline metadata (e.g. AWS Glue returns metadata that is not
+        // an object, or omits required fields). Because a metadata-location is
+        // present, parsing succeeds with null metadata so the catalog can load
+        // the complete metadata file from storage.
+        CommitTableResponseDeserializeParam{
+            .test_name = "UnusableInlineMetadata",
+            .json_str =
+                R"({"metadata-location":"s3://bucket/metadata/v2.json","metadata":"invalid"})",
+            .expected_model = {.metadata_location = "s3://bucket/metadata/v2.json",
+                               .metadata = nullptr}}),
     [](const ::testing::TestParamInfo<CommitTableResponseDeserializeParam>& info) {
       return info.param.test_name;
     });
@@ -1433,12 +1453,6 @@ INSTANTIATE_TEST_SUITE_P(
             .invalid_json_str =
                 R"({"metadata-location":123,"metadata":{"format-version":2,"table-uuid":"test","location":"s3://test","last-sequence-number":0,"last-column-id":1,"last-updated-ms":0,"schemas":[{"type":"struct","schema-id":1,"fields":[{"id":1,"name":"id","type":"int","required":true}]}],"current-schema-id":1,"partition-specs":[{"spec-id":0,"fields":[]}],"default-spec-id":0,"last-partition-id":0,"sort-orders":[{"order-id":0,"fields":[]}],"default-sort-order-id":0}})",
             .expected_error_message = "type must be string, but is number"},
-        // Wrong type for metadata field
-        CommitTableResponseInvalidParam{
-            .test_name = "WrongMetadataType",
-            .invalid_json_str =
-                R"({"metadata-location":"s3://bucket/metadata/v2.json","metadata":"invalid"})",
-            .expected_error_message = "Cannot parse metadata from a non-object"},
         // Empty JSON object
         CommitTableResponseInvalidParam{
             .test_name = "EmptyJson",

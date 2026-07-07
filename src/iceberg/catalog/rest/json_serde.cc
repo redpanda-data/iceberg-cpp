@@ -731,7 +731,16 @@ Result<LoadTableResult> LoadTableResultFromJson(const nlohmann::json& json) {
                           GetJsonValueOrDefault<std::string>(json, kMetadataLocation));
   ICEBERG_ASSIGN_OR_RAISE(auto metadata_json,
                           GetJsonValue<nlohmann::json>(json, kMetadata));
-  ICEBERG_ASSIGN_OR_RAISE(result.metadata, TableMetadataFromJson(metadata_json));
+  // Some catalogs (AWS Glue) return inline metadata that omits required
+  // fields such as "schemas". When the response carries a metadata-location,
+  // leave metadata null and let the caller load the complete metadata file
+  // from storage instead of failing the whole request.
+  auto metadata = TableMetadataFromJson(metadata_json);
+  if (metadata.has_value()) {
+    result.metadata = std::move(metadata.value());
+  } else if (result.metadata_location.empty()) {
+    return std::unexpected<Error>(metadata.error());
+  }
   ICEBERG_ASSIGN_OR_RAISE(result.config,
                           GetJsonValueOrDefault<decltype(result.config)>(json, kConfig));
   if (auto it = json.find(kStorageCredentials); it != json.end() && !it->is_null()) {
@@ -984,7 +993,11 @@ Result<CommitTableResponse> CommitTableResponseFromJson(const nlohmann::json& js
                           GetJsonValue<std::string>(json, kMetadataLocation));
   ICEBERG_ASSIGN_OR_RAISE(auto metadata_json,
                           GetJsonValue<nlohmann::json>(json, kMetadata));
-  ICEBERG_ASSIGN_OR_RAISE(response.metadata, TableMetadataFromJson(metadata_json));
+  // Tolerate unusable inline metadata (AWS Glue omits "schemas"); the
+  // metadata-location above is required, so the caller can reload from it.
+  if (auto metadata = TableMetadataFromJson(metadata_json); metadata.has_value()) {
+    response.metadata = std::move(metadata.value());
+  }
   ICEBERG_RETURN_UNEXPECTED(response.Validate());
   return response;
 }
