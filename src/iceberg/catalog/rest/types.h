@@ -184,15 +184,18 @@ using PageToken = std::string;
 /// \brief Result body for table create/load/register APIs.
 struct ICEBERG_REST_EXPORT LoadTableResult {
   std::string metadata_location;
-  std::shared_ptr<TableMetadata> metadata;  // required
+  /// \brief Required by the spec, but may be null when the inline metadata
+  /// was unusable and metadata_location is set; the catalog then loads the
+  /// metadata file from storage.
+  std::shared_ptr<TableMetadata> metadata;
   std::unordered_map<std::string, std::string> config;
   /// \brief Vended storage credentials, one per URI prefix; empty if none.
   std::vector<StorageCredential> storage_credentials;
 
   /// \brief Validates the LoadTableResult.
   Status Validate() const {
-    if (!metadata) {
-      return ValidationFailed("Invalid metadata: null");
+    if (!metadata && metadata_location.empty()) {
+      return ValidationFailed("Invalid metadata: null and no metadata-location");
     }
     for (const auto& credential : storage_credentials) {
       ICEBERG_RETURN_UNEXPECTED(credential.Validate());
@@ -279,16 +282,15 @@ struct ICEBERG_REST_EXPORT CommitTableRequest {
 
 /// \brief Response from committing changes to a table.
 struct ICEBERG_REST_EXPORT CommitTableResponse {
-  std::string metadata_location;            // required
-  std::shared_ptr<TableMetadata> metadata;  // required
+  std::string metadata_location;  // required
+  /// \brief Required by the spec, but may be null when the inline metadata
+  /// was unusable; the catalog then loads the metadata file from storage.
+  std::shared_ptr<TableMetadata> metadata;
 
   /// \brief Validates the CommitTableResponse.
   Status Validate() const {
     if (metadata_location.empty()) {
       return ValidationFailed("Invalid metadata location: empty");
-    }
-    if (!metadata) {
-      return ValidationFailed("Invalid metadata: null");
     }
     return {};
   }
