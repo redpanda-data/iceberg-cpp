@@ -751,9 +751,8 @@ Result<std::shared_ptr<Transaction>> RestCatalog::StageCreateTable(
   if (!result.metadata) {
     // The inline metadata was unusable (e.g. AWS Glue omits "schemas");
     // load the complete metadata file pointed to by metadata-location.
-    ICEBERG_ASSIGN_OR_RAISE(
-        result.metadata,
-        TableMetadataUtil::Read(*table_io, result.metadata_location));
+    ICEBERG_ASSIGN_OR_RAISE(result.metadata,
+                            TableMetadataUtil::Read(*table_io, result.metadata_location));
   }
   ICEBERG_ASSIGN_OR_RAISE(
       auto table_session,
@@ -874,9 +873,8 @@ Result<std::shared_ptr<Table>> RestCatalog::MakeTableFromLoadResult(
   if (!result.metadata) {
     // The inline metadata was unusable (e.g. AWS Glue omits "schemas");
     // load the complete metadata file pointed to by metadata-location.
-    ICEBERG_ASSIGN_OR_RAISE(
-        result.metadata,
-        TableMetadataUtil::Read(*table_io, result.metadata_location));
+    ICEBERG_ASSIGN_OR_RAISE(result.metadata,
+                            TableMetadataUtil::Read(*table_io, result.metadata_location));
   }
   ICEBERG_ASSIGN_OR_RAISE(
       auto table_session,
