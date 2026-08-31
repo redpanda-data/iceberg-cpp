@@ -358,6 +358,9 @@ Result<std::shared_ptr<Table>> Transaction::Commit() {
 
   const auto& updates = ctx_->metadata_builder->changes();
   if (updates.empty()) {
+    for (const auto& update : pending_updates_) {
+      std::ignore = update->Finalize(ctx_->table->metadata().get());
+    }
     committed_ = true;
     return ctx_->table;
   }

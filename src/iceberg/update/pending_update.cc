@@ -35,19 +35,24 @@ Status PendingUpdate::Commit() {
   if (!ctx_->transaction) {
     // Table-created path: no transaction exists yet, create a temporary one.
     ICEBERG_ASSIGN_OR_RAISE(auto txn, Transaction::Make(ctx_));
+    // Register with the transaction so a commit retry re-applies this update onto the
+    // refreshed metadata; without it a retry rebuilds the metadata with no changes and
+    // reports success while silently dropping the update. The transaction does not
+    // outlive this call, so the non-owning handle is safe.
+    ICEBERG_RETURN_UNEXPECTED(
+        txn->AddUpdate(std::shared_ptr<PendingUpdate>(this, [](PendingUpdate*) {})));
     auto apply_status = txn->Apply(*this);
     if (!apply_status.has_value()) {
       std::ignore = Finalize(std::unexpected(apply_status.error()));
       return apply_status;
     }
 
+    // The transaction finalizes its registered updates, this one included; finalizing
+    // here as well would repeat cleanup and file-deletion callbacks.
     auto commit_result = txn->Commit();
     if (!commit_result.has_value()) {
-      std::ignore = Finalize(std::unexpected(commit_result.error()));
       return std::unexpected(commit_result.error());
     }
-
-    std::ignore = Finalize(commit_result.value()->metadata().get());
     return {};
   }
   auto txn = ctx_->transaction->lock();

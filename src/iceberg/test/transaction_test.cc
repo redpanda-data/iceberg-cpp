@@ -151,6 +151,50 @@ TEST_F(TransactionRetryTest, CommitRetrySucceedsAfterConflict) {
   EXPECT_EQ(update_call_count, 2);
 }
 
+TEST_F(TransactionRetryTest, TableCreatedUpdateIsReappliedOnRetry) {
+  // A concurrent commit moves the metadata location, so the retry's Refresh() swaps
+  // metadata and CommitOnce rebuilds the builder by re-applying registered updates;
+  // with an unchanged location the rebuild never runs and this regression cannot fire.
+  ON_CALL(*mock_catalog_, LoadTable(::testing::_))
+      .WillByDefault([this](const TableIdentifier&) -> Result<std::shared_ptr<Table>> {
+        // A distinct metadata object at a new location: Refresh() must actually swap
+        // metadata, or CommitOnce keeps the stale builder and never re-applies updates.
+        return Table::Make(table_->name(),
+                           std::make_shared<TableMetadata>(*table_->metadata()),
+                           std::string(table_->metadata_file_location()) + "-refreshed",
+                           table_->io(), mock_catalog_);
+      });
+
+  int update_call_count = 0;
+  size_t second_attempt_update_count = 0;
+  ON_CALL(*mock_catalog_, UpdateTable(::testing::_, ::testing::_, ::testing::_))
+      .WillByDefault([this, &update_call_count, &second_attempt_update_count](
+                         const TableIdentifier&,
+                         const std::vector<std::unique_ptr<TableRequirement>>&,
+                         const std::vector<std::unique_ptr<TableUpdate>>& updates)
+                         -> Result<std::shared_ptr<Table>> {
+        ++update_call_count;
+        if (update_call_count == 1) {
+          return CommitFailed("conflict on first attempt");
+        }
+        second_attempt_update_count = updates.size();
+        return Table::Make(mock_table_->name(), mock_table_->metadata(),
+                           std::string(mock_table_->metadata_file_location()),
+                           mock_table_->io(), mock_catalog_);
+      });
+
+  // Created from the table, not from a transaction: the temporary transaction inside
+  // PendingUpdate::Commit must re-apply this update when the first attempt conflicts,
+  // instead of committing an empty change set and reporting success.
+  ICEBERG_UNWRAP_OR_FAIL(auto update, mock_table_->NewUpdateProperties());
+  update->Set("retry.test", "value");
+  EXPECT_THAT(update->Commit(), IsOk());
+
+  EXPECT_EQ(update_call_count, 2);
+  EXPECT_GT(second_attempt_update_count, 0)
+      << "retry posted an empty change set: the pending update was dropped";
+}
+
 TEST_F(TransactionRetryTest, CommitRetryExhausted) {
   int update_call_count = 0;
   ON_CALL(*mock_catalog_, UpdateTable(::testing::_, ::testing::_, ::testing::_))
