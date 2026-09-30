@@ -227,10 +227,17 @@ Status ManifestEntryAdapter::AppendPartitionValues(
         ICEBERG_RETURN_UNEXPECTED(
             AppendField(child_array, std::get<int64_t>(partition_value.value())));
         break;
-      case TypeId::kDecimal:
-        ICEBERG_RETURN_UNEXPECTED(AppendField(
-            child_array, std::get<Decimal>(partition_value.value()).ToBytes()));
+      case TypeId::kDecimal: {
+        const auto& decimal_type =
+            internal::checked_cast<const DecimalType&>(*partition_field.type());
+        ArrowDecimal decimal;
+        ArrowDecimalInit(&decimal, 128, decimal_type.precision(), decimal_type.scale());
+        ArrowDecimalSetBytes(&decimal,
+                             std::get<Decimal>(partition_value.value()).ToBytes().data());
+        ICEBERG_NANOARROW_RETURN_UNEXPECTED(
+            ArrowArrayAppendDecimal(child_array, &decimal));
         break;
+      }
       case TypeId::kUuid:
         ICEBERG_RETURN_UNEXPECTED(
             AppendField(child_array, std::get<Uuid>(partition_value.value()).bytes()));
