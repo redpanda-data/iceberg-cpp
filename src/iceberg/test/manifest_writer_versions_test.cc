@@ -471,6 +471,35 @@ TEST_F(ManifestWriterVersionsTest, TestV2Write) {
              DataFile::Content::kData);
 }
 
+TEST_F(ManifestWriterVersionsTest, TestV2WriteDecimalPartitionValues) {
+  constexpr int128_t kMax38 = [] {
+    int128_t value = 1;
+    for (int i = 0; i < 38; ++i) {
+      value *= 10;
+    }
+    return value - 1;
+  }();
+  schema_ = std::make_shared<Schema>(
+      std::vector<SchemaField>{SchemaField::MakeRequired(1, "id", int64()),
+                               SchemaField::MakeRequired(2, "timestamp", timestamp_tz()),
+                               SchemaField::MakeRequired(3, "category", string()),
+                               SchemaField::MakeRequired(4, "data", string()),
+                               SchemaField::MakeRequired(5, "double", float64()),
+                               SchemaField::MakeOptional(6, "narrow", decimal(10, 2)),
+                               SchemaField::MakeOptional(7, "wide", decimal(38, 10))});
+  spec_ =
+      PartitionSpec::Make(0, {PartitionField(6, 1000, "narrow", Transform::Identity()),
+                              PartitionField(7, 1001, "wide", Transform::Identity())})
+          .value();
+  data_file_->partition = PartitionValues(
+      {Literal::Decimal(-1234, 10, 2), Literal::Decimal(-kMax38, 38, 10)});
+
+  auto entries = ReadManifest(WriteManifest(/*format_version=*/2, {data_file_}));
+
+  ASSERT_EQ(entries.size(), 1);
+  EXPECT_EQ(entries[0].data_file->partition, data_file_->partition);
+}
+
 TEST_F(ManifestWriterVersionsTest, TestV2WriteWithInheritance) {
   auto manifests =
       WriteAndReadManifests({WriteManifest(/*format_version=*/2, {data_file_})}, 2);

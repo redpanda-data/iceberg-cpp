@@ -594,8 +594,10 @@ Status ExtractDatumFromArray(const ::arrow::Array& array, int64_t index,
           internal::checked_cast<const ::arrow::Decimal128Array&>(array);
       std::string_view decimal_value = decimal_array.GetView(index);
       auto& fixed_datum = datum->value<::avro::GenericFixed>();
+      const auto fixed_size =
+          static_cast<std::ptrdiff_t>(fixed_datum.schema()->fixedSize());
       auto& bytes = fixed_datum.value();
-      bytes.assign(decimal_value.begin(), decimal_value.end());
+      bytes.assign(decimal_value.begin(), decimal_value.begin() + fixed_size);
       std::ranges::reverse(bytes);
       return {};
     }

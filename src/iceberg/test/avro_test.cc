@@ -882,6 +882,71 @@ TEST_P(AvroWriterTest, WritePrimitiveTypes) {
   VerifyWrittenData(test_data);
 }
 
+TEST_P(AvroWriterTest, WriteDecimalTypes) {
+  // Precisions at the boundaries where the Avro fixed size changes.
+  struct DecimalCase {
+    int32_t precision;
+    int32_t scale;
+    size_t fixed_size;
+  };
+  const std::vector<DecimalCase> cases = {
+      {.precision = 1, .scale = 0, .fixed_size = 1},
+      {.precision = 2, .scale = 0, .fixed_size = 1},
+      {.precision = 3, .scale = 1, .fixed_size = 2},
+      {.precision = 9, .scale = 2, .fixed_size = 4},
+      {.precision = 10, .scale = 2, .fixed_size = 5},
+      {.precision = 18, .scale = 4, .fixed_size = 8},
+      {.precision = 19, .scale = 0, .fixed_size = 9},
+      {.precision = 28, .scale = 6, .fixed_size = 12},
+      {.precision = 38, .scale = 10, .fixed_size = 16}};
+
+  std::vector<SchemaField> fields;
+  for (size_t i = 0; i < cases.size(); ++i) {
+    fields.push_back(
+        SchemaField::MakeRequired(static_cast<int32_t>(i + 1), "d" + std::to_string(i),
+                                  decimal(cases[i].precision, cases[i].scale)));
+  }
+  auto schema = std::make_shared<iceberg::Schema>(std::move(fields));
+
+  // Max, min, zero and one-ulp values for every precision. Arrow's JSON parser
+  // requires the string to carry exactly the type's scale.
+  auto with_scale = [](std::string digits, int32_t scale) {
+    if (scale > 0) digits.insert(digits.size() - scale, ".");
+    return digits;
+  };
+  auto max_value = [&](const DecimalCase& c) {
+    return with_scale(std::string(c.precision, '9'), c.scale);
+  };
+  auto zero = [&](const DecimalCase& c) {
+    return with_scale(std::string(c.scale + 1, '0'), c.scale);
+  };
+  auto one_ulp = [&](const DecimalCase& c) {
+    return with_scale(std::string(c.scale, '0') + "1", c.scale);
+  };
+  auto row = [&](auto value_of) {
+    std::string out = "[";
+    for (size_t i = 0; i < cases.size(); ++i) {
+      out += (i ? ", \"" : "\"") + value_of(cases[i]) + "\"";
+    }
+    return out + "]";
+  };
+  std::string test_data =
+      "[" + row(max_value) + ", " +
+      row([&](const DecimalCase& c) { return "-" + max_value(c); }) + ", " + row(zero) +
+      ", " + row([&](const DecimalCase& c) { return "-" + one_ulp(c); }) + "]";
+
+  WriteAvroFile(schema, test_data);
+
+  auto root = PhysicalAvroSchema().root();
+  ASSERT_EQ(root->leaves(), cases.size());
+  for (size_t i = 0; i < cases.size(); ++i) {
+    EXPECT_EQ(root->leafAt(i)->fixedSize(), cases[i].fixed_size)
+        << "decimal(" << cases[i].precision << ", " << cases[i].scale << ")";
+  }
+
+  VerifyWrittenData(test_data);
+}
+
 TEST_P(AvroWriterTest, WriteUuidType) {
   auto schema = std::make_shared<iceberg::Schema>(std::vector<SchemaField>{
       SchemaField::MakeRequired(1, "uuid_col", iceberg::uuid())});

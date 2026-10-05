@@ -920,6 +920,7 @@ const std::vector<ExtractDatumParam> kExtractDatumTestCases = {
               const auto& fixed = record.fieldAt(0).value<::avro::GenericFixed>();
 
               const auto& bytes = fixed.value();
+              EXPECT_EQ(bytes.size(), 5);
               auto decimal =
                   ::arrow::Decimal128::FromBigEndian(
                       reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size())

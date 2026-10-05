@@ -424,6 +424,16 @@ Status ParsePartitionValues(ArrowArrayView* view, int64_t row_idx,
       partition.AddValue(Literal::Binary(std::vector<uint8_t>(
           buf_value.data.as_char, buf_value.data.as_char + buf_value.size_bytes)));
     } break;
+    case ArrowType::NANOARROW_TYPE_DECIMAL128: {
+      const auto& decimal_type = internal::checked_cast<const DecimalType&>(*field_type);
+      ArrowDecimal decimal;
+      ArrowDecimalInit(&decimal, 128, decimal_type.precision(), decimal_type.scale());
+      ArrowArrayViewGetDecimalUnsafe(view, row_idx, &decimal);
+      const Decimal value(static_cast<int64_t>(decimal.words[decimal.high_word_index]),
+                          decimal.words[decimal.low_word_index]);
+      partition.AddValue(Literal::Decimal(value.value(), decimal_type.precision(),
+                                          decimal_type.scale()));
+    } break;
     default:
       return InvalidManifest("Unsupported type {} for partition values",
                              ArrowTypeString(view->storage_type));
