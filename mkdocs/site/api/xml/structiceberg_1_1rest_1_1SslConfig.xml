@@ -1,0 +1,101 @@
+<?xml version='1.0' encoding='UTF-8' standalone='no'?>
+<doxygen xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="compound.xsd" version="1.9.8" xml:lang="en-US">
+  <compounddef id="structiceberg_1_1rest_1_1SslConfig" kind="struct" language="C++" prot="public">
+    <compoundname>iceberg::rest::SslConfig</compoundname>
+    <includes refid="http__client_8h" local="no">http_client.h</includes>
+    <sectiondef kind="public-attrib">
+      <memberdef kind="variable" id="structiceberg_1_1rest_1_1SslConfig_1acce54c6b0892acd454dd7a944c02d471" prot="public" static="no" mutable="no">
+        <type>bool</type>
+        <definition>bool iceberg::rest::SslConfig::verify</definition>
+        <argsstring></argsstring>
+        <name>verify</name>
+        <qualifiedname>iceberg::rest::SslConfig::verify</qualifiedname>
+        <initializer>= true</initializer>
+        <briefdescription>
+        </briefdescription>
+        <detaileddescription>
+<para>Verify the server certificate and hostname (maps to CURLOPT_SSL_VERIFYPEER / CURLOPT_SSL_VERIFYHOST). Default: true. </para>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="iceberg/catalog/rest/http_client.h" line="74" column="8" bodyfile="iceberg/catalog/rest/http_client.h" bodystart="74" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structiceberg_1_1rest_1_1SslConfig_1a0de1847855f76688bcf5f53e6730fd21" prot="public" static="no" mutable="no">
+        <type>std::string</type>
+        <definition>std::string iceberg::rest::SslConfig::ca_info</definition>
+        <argsstring></argsstring>
+        <name>ca_info</name>
+        <qualifiedname>iceberg::rest::SslConfig::ca_info</qualifiedname>
+        <briefdescription>
+<para>Path to a CA certificate bundle file (CURLOPT_CAINFO). </para>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="iceberg/catalog/rest/http_client.h" line="76" column="15" bodyfile="iceberg/catalog/rest/http_client.h" bodystart="76" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structiceberg_1_1rest_1_1SslConfig_1ab4f87284d4ebb0c55061b822dded7398" prot="public" static="no" mutable="no">
+        <type>std::string</type>
+        <definition>std::string iceberg::rest::SslConfig::ca_path</definition>
+        <argsstring></argsstring>
+        <name>ca_path</name>
+        <qualifiedname>iceberg::rest::SslConfig::ca_path</qualifiedname>
+        <briefdescription>
+<para>Path to a directory of CA certificates (CURLOPT_CAPATH). </para>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="iceberg/catalog/rest/http_client.h" line="78" column="15" bodyfile="iceberg/catalog/rest/http_client.h" bodystart="78" bodyend="-1"/>
+      </memberdef>
+      <memberdef kind="variable" id="structiceberg_1_1rest_1_1SslConfig_1adf7b7ddf94921f4524fb43115a572649" prot="public" static="no" mutable="no">
+        <type>std::string</type>
+        <definition>std::string iceberg::rest::SslConfig::crl_file</definition>
+        <argsstring></argsstring>
+        <name>crl_file</name>
+        <qualifiedname>iceberg::rest::SslConfig::crl_file</qualifiedname>
+        <briefdescription>
+<para>Path to a certificate revocation list file (CURLOPT_CRLFILE). </para>
+        </briefdescription>
+        <detaileddescription>
+        </detaileddescription>
+        <inbodydescription>
+        </inbodydescription>
+        <location file="iceberg/catalog/rest/http_client.h" line="80" column="15" bodyfile="iceberg/catalog/rest/http_client.h" bodystart="80" bodyend="-1"/>
+      </memberdef>
+    </sectiondef>
+    <briefdescription>
+<para>TLS/SSL options for the REST HTTP client. </para>
+    </briefdescription>
+    <detaileddescription>
+    </detaileddescription>
+    <collaborationgraph>
+      <node id="1">
+        <label>iceberg::rest::SslConfig</label>
+        <link refid="structiceberg_1_1rest_1_1SslConfig"/>
+        <childnode refid="2" relation="usage">
+          <edgelabel>ca_info</edgelabel>
+          <edgelabel>ca_path</edgelabel>
+          <edgelabel>crl_file</edgelabel>
+        </childnode>
+      </node>
+      <node id="3">
+        <label>std::basic_string&lt; Char &gt;</label>
+      </node>
+      <node id="2">
+        <label>std::string</label>
+        <childnode refid="3" relation="public-inheritance">
+        </childnode>
+      </node>
+    </collaborationgraph>
+    <location file="iceberg/catalog/rest/http_client.h" line="71" column="1" bodyfile="iceberg/catalog/rest/http_client.h" bodystart="71" bodyend="81"/>
+    <listofallmembers>
+      <member refid="structiceberg_1_1rest_1_1SslConfig_1a0de1847855f76688bcf5f53e6730fd21" prot="public" virt="non-virtual"><scope>iceberg::rest::SslConfig</scope><name>ca_info</name></member>
+      <member refid="structiceberg_1_1rest_1_1SslConfig_1ab4f87284d4ebb0c55061b822dded7398" prot="public" virt="non-virtual"><scope>iceberg::rest::SslConfig</scope><name>ca_path</name></member>
+      <member refid="structiceberg_1_1rest_1_1SslConfig_1adf7b7ddf94921f4524fb43115a572649" prot="public" virt="non-virtual"><scope>iceberg::rest::SslConfig</scope><name>crl_file</name></member>
+      <member refid="structiceberg_1_1rest_1_1SslConfig_1acce54c6b0892acd454dd7a944c02d471" prot="public" virt="non-virtual"><scope>iceberg::rest::SslConfig</scope><name>verify</name></member>
+    </listofallmembers>
+  </compounddef>
+</doxygen>
