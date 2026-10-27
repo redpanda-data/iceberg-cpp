@@ -32,7 +32,7 @@
 
 namespace iceberg {
 
-/// \brief A Catalog API for table create, drop, and load operations.
+/// \brief A Catalog API for table and view create, drop, and load operations.
 ///
 /// Note that these functions are named after the corresponding operationId
 /// specified by the Iceberg Rest Catalog API.
@@ -188,6 +188,89 @@ class ICEBERG_EXPORT Catalog {
   /// \return a Table instance or ErrorKind::kAlreadyExists if the table already exists
   virtual Result<std::shared_ptr<Table>> RegisterTable(
       const TableIdentifier& identifier, const std::string& metadata_file_location) = 0;
+
+  /// \brief Return all the view identifiers under this namespace
+  ///
+  /// \param ns a namespace
+  /// \return a list of identifiers for views;
+  ///         ErrorKind::kNoSuchNamespace if the namespace does not exist;
+  ///         ErrorKind::kNotSupported if the catalog does not support views
+  virtual Result<std::vector<TableIdentifier>> ListViews(const Namespace& ns) const {
+    return NotSupported("ListViews is not supported by this catalog");
+  }
+
+  /// \brief Load a view
+  ///
+  /// \param identifier a view identifier
+  /// \return the view metadata or ErrorKind::kNoSuchView if the view does not exist;
+  ///         ErrorKind::kNotSupported if the catalog does not support views
+  virtual Result<std::shared_ptr<ViewMetadata>> LoadView(
+      const TableIdentifier& identifier) {
+    return NotSupported("LoadView is not supported by this catalog");
+  }
+
+  /// \brief Create a view
+  ///
+  /// \param identifier a view identifier
+  /// \param version the initial view version; its schema_id is replaced by the id the
+  ///        catalog assigns to \p schema
+  /// \param schema the schema of the view
+  /// \param location a location for the view; leave empty if unspecified
+  /// \param properties a string map of view properties
+  /// \return the metadata of the created view or ErrorKind::kAlreadyExists if the view
+  ///         already exists; ErrorKind::kNotSupported if the catalog does not support
+  ///         views
+  virtual Result<std::shared_ptr<ViewMetadata>> CreateView(
+      const TableIdentifier& identifier, const ViewVersion& version,
+      const std::shared_ptr<Schema>& schema, const std::string& location,
+      const std::unordered_map<std::string, std::string>& properties) {
+    return NotSupported("CreateView is not supported by this catalog");
+  }
+
+  /// \brief Replace a view by committing metadata updates
+  ///
+  /// \param identifier a view identifier
+  /// \param requirements a list of view requirements
+  /// \param updates a list of view updates
+  /// \return the resulting view metadata; ErrorKind::kNoSuchView if the view does not
+  ///         exist; ErrorKind::kCommitFailed if a requirement failed;
+  ///         ErrorKind::kNotSupported if the catalog does not support views
+  virtual Result<std::shared_ptr<ViewMetadata>> ReplaceView(
+      const TableIdentifier& identifier,
+      const std::vector<std::unique_ptr<ViewRequirement>>& requirements,
+      const std::vector<std::unique_ptr<ViewUpdate>>& updates) {
+    return NotSupported("ReplaceView is not supported by this catalog");
+  }
+
+  /// \brief Check whether a view exists
+  ///
+  /// \param identifier a view identifier
+  /// \return true if the view exists, false otherwise;
+  ///         ErrorKind::kNotSupported if the catalog does not support views
+  virtual Result<bool> ViewExists(const TableIdentifier& identifier) const {
+    return NotSupported("ViewExists is not supported by this catalog");
+  }
+
+  /// \brief Drop a view
+  ///
+  /// \param identifier a view identifier
+  /// \return Status indicating success if dropped; ErrorKind::kNoSuchView if the view
+  ///         does not exist; ErrorKind::kNotSupported if the catalog does not support
+  ///         views
+  virtual Status DropView(const TableIdentifier& identifier) {
+    return NotSupported("DropView is not supported by this catalog");
+  }
+
+  /// \brief Rename a view
+  ///
+  /// \param from the current view identifier
+  /// \param to the new view identifier
+  /// \return Status indicating success if renamed; ErrorKind::kNoSuchView if the view
+  ///         does not exist; ErrorKind::kAlreadyExists if \p to already exists;
+  ///         ErrorKind::kNotSupported if the catalog does not support views
+  virtual Status RenameView(const TableIdentifier& from, const TableIdentifier& to) {
+    return NotSupported("RenameView is not supported by this catalog");
+  }
 };
 
 }  // namespace iceberg
