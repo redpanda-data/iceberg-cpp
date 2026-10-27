@@ -145,7 +145,7 @@ std::vector<std::unique_ptr<TableUpdate>> ChangesForCreate(
   if (auto partition_spec_result = metadata.PartitionSpec();
       partition_spec_result.has_value()) {
     auto spec = partition_spec_result.value();
-    if (spec && spec->spec_id() != PartitionSpec::kInitialSpecId) {
+    if (spec && !spec->fields().empty()) {
       changes.push_back(std::make_unique<table::AddPartitionSpec>(spec));
     } else {
       changes.push_back(
