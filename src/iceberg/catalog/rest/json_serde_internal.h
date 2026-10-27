@@ -89,6 +89,24 @@ template <>
 ICEBERG_REST_EXPORT Result<CommitTableResponse> FromJson(const nlohmann::json& json);
 ICEBERG_REST_EXPORT Result<nlohmann::json> ToJson(const CommitTableResponse& model);
 
+ICEBERG_REST_EXPORT Result<CreateViewRequest> CreateViewRequestFromJson(
+    const nlohmann::json& json);
+template <>
+ICEBERG_REST_EXPORT Result<CreateViewRequest> FromJson(const nlohmann::json& json);
+ICEBERG_REST_EXPORT Result<nlohmann::json> ToJson(const CreateViewRequest& model);
+
+ICEBERG_REST_EXPORT Result<LoadViewResult> LoadViewResultFromJson(
+    const nlohmann::json& json);
+template <>
+ICEBERG_REST_EXPORT Result<LoadViewResult> FromJson(const nlohmann::json& json);
+ICEBERG_REST_EXPORT Result<nlohmann::json> ToJson(const LoadViewResult& model);
+
+ICEBERG_REST_EXPORT Result<CommitViewRequest> CommitViewRequestFromJson(
+    const nlohmann::json& json);
+template <>
+ICEBERG_REST_EXPORT Result<CommitViewRequest> FromJson(const nlohmann::json& json);
+ICEBERG_REST_EXPORT Result<nlohmann::json> ToJson(const CommitViewRequest& model);
+
 ICEBERG_REST_EXPORT Result<PlanTableScanResponse> PlanTableScanResponseFromJson(
     const nlohmann::json& json,
     const std::unordered_map<int32_t, std::shared_ptr<PartitionSpec>>&

@@ -81,6 +81,15 @@ class ICEBERG_REST_EXPORT ResourcePaths {
   /// endpoint path.
   Result<std::string> Credentials(const TableIdentifier& ident) const;
 
+  /// \brief Get the /v1/{prefix}/namespaces/{namespace}/views endpoint path.
+  Result<std::string> Views(const Namespace& ns) const;
+
+  /// \brief Get the /v1/{prefix}/namespaces/{namespace}/views/{view} endpoint path.
+  Result<std::string> View(const TableIdentifier& ident) const;
+
+  /// \brief Get the /v1/{prefix}/views/rename endpoint path.
+  Result<std::string> RenameView() const;
+
   /// \brief Get the /v1/{prefix}/transactions/commit endpoint path.
   Result<std::string> CommitTransaction() const;
 

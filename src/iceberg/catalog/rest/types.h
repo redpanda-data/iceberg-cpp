@@ -212,6 +212,69 @@ using CreateTableResponse = LoadTableResult;
 /// \brief Alias of LoadTableResult used as the body of LoadTableResponse
 using LoadTableResponse = LoadTableResult;
 
+/// \brief Request to create a view.
+struct ICEBERG_REST_EXPORT CreateViewRequest {
+  std::string name;  // required
+  std::string location;
+  std::shared_ptr<Schema> schema;             // required
+  std::shared_ptr<ViewVersion> view_version;  // required
+  std::unordered_map<std::string, std::string> properties;
+
+  /// \brief Validates the CreateViewRequest.
+  Status Validate() const {
+    if (name.empty()) {
+      return ValidationFailed("Missing view name");
+    }
+    if (!schema) {
+      return ValidationFailed("Missing schema");
+    }
+    if (!view_version) {
+      return ValidationFailed("Missing view version");
+    }
+    return {};
+  }
+
+  bool operator==(const CreateViewRequest& other) const;
+};
+
+/// \brief Result body for view create/load/replace APIs.
+struct ICEBERG_REST_EXPORT LoadViewResult {
+  std::string metadata_location;           // required
+  std::shared_ptr<ViewMetadata> metadata;  // required
+  std::unordered_map<std::string, std::string> config;
+
+  /// \brief Validates the LoadViewResult.
+  Status Validate() const {
+    if (metadata_location.empty()) {
+      return ValidationFailed("Invalid metadata location: empty");
+    }
+    if (!metadata) {
+      return ValidationFailed("Invalid metadata: null");
+    }
+    return {};
+  }
+
+  bool operator==(const LoadViewResult& other) const;
+};
+
+/// \brief Alias of LoadViewResult used as the body of CreateViewResponse
+using CreateViewResponse = LoadViewResult;
+
+/// \brief Alias of LoadViewResult used as the body of LoadViewResponse
+using LoadViewResponse = LoadViewResult;
+
+/// \brief Request to commit changes to a view.
+struct ICEBERG_REST_EXPORT CommitViewRequest {
+  TableIdentifier identifier;
+  std::vector<std::shared_ptr<ViewRequirement>> requirements;  // required
+  std::vector<std::shared_ptr<ViewUpdate>> updates;            // required
+
+  /// \brief Validates the CommitViewRequest.
+  Status Validate() const { return {}; }
+
+  bool operator==(const CommitViewRequest& other) const;
+};
+
 /// \brief Response body for listing namespaces.
 struct ICEBERG_REST_EXPORT ListNamespacesResponse {
   PageToken next_page_token;
@@ -267,6 +330,9 @@ struct ICEBERG_REST_EXPORT ListTablesResponse {
 
   bool operator==(const ListTablesResponse&) const = default;
 };
+
+/// \brief Alias of ListTablesResponse used as the body of the ListViews response
+using ListViewsResponse = ListTablesResponse;
 
 /// \brief Request to commit changes to a table.
 struct ICEBERG_REST_EXPORT CommitTableRequest {

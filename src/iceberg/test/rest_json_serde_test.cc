@@ -30,6 +30,7 @@
 #include "iceberg/catalog/rest/types.h"
 #include "iceberg/expression/expressions.h"
 #include "iceberg/file_format.h"
+#include "iceberg/json_serde_internal.h"
 #include "iceberg/manifest/manifest_entry.h"
 #include "iceberg/partition_spec.h"
 #include "iceberg/result.h"
@@ -42,6 +43,9 @@
 #include "iceberg/table_update.h"
 #include "iceberg/test/matchers.h"
 #include "iceberg/transform.h"
+#include "iceberg/util/timepoint.h"
+#include "iceberg/view/view_metadata.h"
+#include "iceberg/view/view_update.h"
 
 namespace iceberg::rest {
 
@@ -2617,6 +2621,164 @@ TEST(FetchPlanningResultResponseRoundtripTest, FailedWithError) {
       FetchPlanningResultResponseFromJson(roundtrip_json, EmptySpecs(), EmptySchema());
   ASSERT_THAT(result2, IsOk());
   EXPECT_EQ(*result, *result2);
+}
+
+// View request/response types
+
+namespace {
+
+std::shared_ptr<ViewVersion> MakeViewVersion(
+    std::optional<TableIdentifier> storage_table) {
+  return std::make_shared<ViewVersion>(ViewVersion{
+      .version_id = 1,
+      .schema_id = 1,
+      .timestamp_ms = TimePointMsFromUnixMs(1573518431292),
+      .summary = {{"engine-name", "oxla"}},
+      .representations = {{.type = "sql", .sql = "SELECT 1", .dialect = "postgresql"}},
+      .default_catalog = std::nullopt,
+      .default_namespace = {.levels = {"default"}},
+      .storage_table = std::move(storage_table),
+  });
+}
+
+std::shared_ptr<ViewMetadata> MakeViewMetadata(
+    std::optional<TableIdentifier> storage_table) {
+  return std::make_shared<ViewMetadata>(ViewMetadata{
+      .view_uuid = "fa6506c3-7681-40c8-86dc-e36561f83385",
+      .format_version = 1,
+      .location = "s3://bucket/warehouse/default.db/event_agg",
+      .current_version_id = 1,
+      .versions = {MakeViewVersion(std::move(storage_table))},
+      .version_log = {{.timestamp_ms = TimePointMsFromUnixMs(1573518431292),
+                       .version_id = 1}},
+      .schemas = {std::make_shared<Schema>(
+          std::vector<SchemaField>{SchemaField(1, "id", int32(), false)}, 1)},
+      .properties = {{"comment", "c"}},
+  });
+}
+
+}  // namespace
+
+TEST(CreateViewRequestTest, SerializesRequiredFieldsAndStorageTable) {
+  CreateViewRequest request{
+      .name = "event_agg_mv",
+      .schema = MakeSimpleSchema(),
+      .view_version = MakeViewVersion(TableIdentifier{.ns = {.levels = {"default"}},
+                                                      .name = "event_agg_mv__storage"}),
+      .properties = {{"comment", "c"}},
+  };
+
+  ICEBERG_UNWRAP_OR_FAIL(auto json, ToJson(request));
+  EXPECT_EQ(json["name"], "event_agg_mv");
+  EXPECT_FALSE(json.contains("location"));
+  EXPECT_EQ(json["schema"]["type"], "struct");
+  EXPECT_EQ(json["properties"], nlohmann::json({{"comment", "c"}}));
+  EXPECT_EQ(json["view-version"]["version-id"], 1);
+  EXPECT_EQ(json["view-version"]["default-namespace"],
+            nlohmann::json::array({"default"}));
+  EXPECT_FALSE(json["view-version"].contains("default-catalog"));
+  EXPECT_EQ(json["view-version"]["representations"][0]["dialect"], "postgresql");
+  EXPECT_EQ(
+      json["view-version"]["storage-table"],
+      nlohmann::json({{"namespace", {"default"}}, {"name", "event_agg_mv__storage"}}));
+
+  auto parsed = CreateViewRequestFromJson(json);
+  ASSERT_THAT(parsed, IsOk());
+  EXPECT_EQ(*parsed, request);
+}
+
+TEST(CreateViewRequestTest, SerializesLocationWhenSet) {
+  CreateViewRequest request{
+      .name = "v",
+      .location = "s3://bucket/v",
+      .schema = MakeSimpleSchema(),
+      .view_version = MakeViewVersion(std::nullopt),
+  };
+  ICEBERG_UNWRAP_OR_FAIL(auto json, ToJson(request));
+  EXPECT_EQ(json["location"], "s3://bucket/v");
+  EXPECT_FALSE(json["view-version"].contains("storage-table"));
+  EXPECT_EQ(json["properties"], nlohmann::json::object());
+}
+
+TEST(CreateViewRequestTest, RejectsMissingViewVersion) {
+  auto json = nlohmann::json::parse(
+      R"({"name":"v","schema":{"type":"struct","schema-id":1,"fields":[]},"properties":{}})");
+  EXPECT_THAT(CreateViewRequestFromJson(json), HasErrorMessage("view-version"));
+}
+
+TEST(LoadViewResultTest, RoundTripsAndKeepsStorageTable) {
+  const TableIdentifier storage_table{.ns = {.levels = {"default"}},
+                                      .name = "event_agg_mv__storage"};
+  LoadViewResult result{
+      .metadata_location = "s3://bucket/warehouse/default.db/event_agg/metadata/1.json",
+      .metadata = MakeViewMetadata(storage_table),
+      .config = {{"token", "t"}},
+  };
+
+  ICEBERG_UNWRAP_OR_FAIL(auto json, ToJson(result));
+  EXPECT_EQ(json["metadata-location"], result.metadata_location);
+  EXPECT_EQ(json["config"], nlohmann::json({{"token", "t"}}));
+  EXPECT_EQ(json["metadata"]["versions"][0]["storage-table"]["name"],
+            "event_agg_mv__storage");
+
+  auto parsed = LoadViewResultFromJson(json);
+  ASSERT_THAT(parsed, IsOk());
+  EXPECT_EQ(*parsed, result);
+  auto version = parsed->metadata->CurrentVersion();
+  ASSERT_THAT(version, IsOk());
+  EXPECT_EQ(version.value()->storage_table, storage_table);
+}
+
+TEST(LoadViewResultTest, RejectsMissingMetadata) {
+  EXPECT_THAT(
+      LoadViewResultFromJson(nlohmann::json::parse(R"({"metadata-location":"x"})")),
+      HasErrorMessage("metadata"));
+  ICEBERG_UNWRAP_OR_FAIL(auto metadata_json, ToJson(*MakeViewMetadata(std::nullopt)));
+  nlohmann::json json;
+  json["metadata"] = metadata_json;
+  EXPECT_THAT(LoadViewResultFromJson(json), HasErrorMessage("metadata-location"));
+}
+
+TEST(CommitViewRequestTest, RoundTripsRequirementsAndUpdates) {
+  CommitViewRequest request{
+      .identifier = {.ns = {.levels = {"default"}}, .name = "event_agg_mv"}};
+  request.requirements.push_back(std::make_shared<view::AssertViewUUID>("uuid-1"));
+  request.updates.push_back(std::make_shared<view::AddSchema>(MakeSimpleSchema()));
+  request.updates.push_back(std::make_shared<view::AddViewVersion>(MakeViewVersion(
+      TableIdentifier{.ns = {.levels = {"default"}}, .name = "event_agg_mv__storage"})));
+  request.updates.push_back(std::make_shared<view::SetCurrentViewVersion>(-1));
+  request.updates.push_back(std::make_shared<view::SetProperties>(
+      std::unordered_map<std::string, std::string>{{"comment", "c"}}));
+  request.updates.push_back(
+      std::make_shared<view::RemoveProperties>(std::unordered_set<std::string>{"k"}));
+
+  ICEBERG_UNWRAP_OR_FAIL(auto json, ToJson(request));
+  EXPECT_EQ(json["identifier"]["name"], "event_agg_mv");
+  EXPECT_EQ(json["requirements"],
+            nlohmann::json::array({{{"type", "assert-view-uuid"}, {"uuid", "uuid-1"}}}));
+  ASSERT_EQ(json["updates"].size(), 5);
+  EXPECT_EQ(json["updates"][0]["action"], "add-schema");
+  EXPECT_EQ(json["updates"][1]["action"], "add-view-version");
+  EXPECT_EQ(json["updates"][1]["view-version"]["storage-table"]["name"],
+            "event_agg_mv__storage");
+  EXPECT_EQ(json["updates"][2], nlohmann::json({{"action", "set-current-view-version"},
+                                                {"view-version-id", -1}}));
+  EXPECT_EQ(json["updates"][3]["updates"], nlohmann::json({{"comment", "c"}}));
+  EXPECT_EQ(json["updates"][4]["removals"], nlohmann::json::array({"k"}));
+
+  auto parsed = CommitViewRequestFromJson(json);
+  ASSERT_THAT(parsed, IsOk());
+  EXPECT_EQ(*parsed, request);
+}
+
+TEST(CommitViewRequestTest, ParsesRequestWithoutIdentifier) {
+  auto json = nlohmann::json::parse(
+      R"({"requirements":[],"updates":[{"action":"set-location","location":"s3://b/v"}]})");
+  auto parsed = CommitViewRequestFromJson(json);
+  ASSERT_THAT(parsed, IsOk());
+  EXPECT_TRUE(parsed->identifier.name.empty());
+  ASSERT_EQ(parsed->updates.size(), 1);
+  EXPECT_EQ(*parsed->updates[0], view::SetLocation("s3://b/v"));
 }
 
 }  // namespace iceberg::rest

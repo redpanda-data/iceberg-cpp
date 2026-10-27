@@ -31,6 +31,8 @@
 #include "iceberg/table_requirement.h"
 #include "iceberg/table_scan.h"
 #include "iceberg/table_update.h"
+#include "iceberg/view/view_metadata.h"
+#include "iceberg/view/view_update.h"
 
 namespace iceberg::rest {
 
@@ -96,6 +98,66 @@ bool LoadTableResult::operator==(const LoadTableResult& other) const {
   }
   if (metadata && *metadata != *other.metadata) {
     return false;
+  }
+  return true;
+}
+
+bool CreateViewRequest::operator==(const CreateViewRequest& other) const {
+  if (name != other.name || location != other.location ||
+      properties != other.properties) {
+    return false;
+  }
+  if (!schema != !other.schema) {
+    return false;
+  }
+  if (schema && *schema != *other.schema) {
+    return false;
+  }
+  if (!view_version != !other.view_version) {
+    return false;
+  }
+  if (view_version && *view_version != *other.view_version) {
+    return false;
+  }
+  return true;
+}
+
+bool LoadViewResult::operator==(const LoadViewResult& other) const {
+  if (metadata_location != other.metadata_location || config != other.config) {
+    return false;
+  }
+  if (!metadata != !other.metadata) {
+    return false;
+  }
+  if (metadata && *metadata != *other.metadata) {
+    return false;
+  }
+  return true;
+}
+
+bool CommitViewRequest::operator==(const CommitViewRequest& other) const {
+  if (identifier != other.identifier) {
+    return false;
+  }
+  if (requirements.size() != other.requirements.size() ||
+      updates.size() != other.updates.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < requirements.size(); ++i) {
+    if (!requirements[i] != !other.requirements[i]) {
+      return false;
+    }
+    if (requirements[i] && *requirements[i] != *other.requirements[i]) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < updates.size(); ++i) {
+    if (!updates[i] != !other.updates[i]) {
+      return false;
+    }
+    if (updates[i] && *updates[i] != *other.updates[i]) {
+      return false;
+    }
   }
   return true;
 }

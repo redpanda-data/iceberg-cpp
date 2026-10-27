@@ -94,6 +94,43 @@ TEST(EndpointTest, NamespaceEndpoints) {
 }
 
 // Test predefined table endpoints
+TEST(EndpointTest, ViewEndpoints) {
+  auto list_views = Endpoint::ListViews();
+  EXPECT_EQ(list_views.method(), HttpMethod::kGet);
+  EXPECT_EQ(list_views.path(), "/v1/{prefix}/namespaces/{namespace}/views");
+
+  auto load_view = Endpoint::LoadView();
+  EXPECT_EQ(load_view.method(), HttpMethod::kGet);
+  EXPECT_EQ(load_view.path(), "/v1/{prefix}/namespaces/{namespace}/views/{view}");
+
+  auto view_exists = Endpoint::ViewExists();
+  EXPECT_EQ(view_exists.method(), HttpMethod::kHead);
+  EXPECT_EQ(view_exists.path(), "/v1/{prefix}/namespaces/{namespace}/views/{view}");
+
+  auto create_view = Endpoint::CreateView();
+  EXPECT_EQ(create_view.method(), HttpMethod::kPost);
+  EXPECT_EQ(create_view.path(), "/v1/{prefix}/namespaces/{namespace}/views");
+
+  auto replace_view = Endpoint::ReplaceView();
+  EXPECT_EQ(replace_view.method(), HttpMethod::kPost);
+  EXPECT_EQ(replace_view.path(), "/v1/{prefix}/namespaces/{namespace}/views/{view}");
+
+  auto delete_view = Endpoint::DeleteView();
+  EXPECT_EQ(delete_view.method(), HttpMethod::kDelete);
+  EXPECT_EQ(delete_view.path(), "/v1/{prefix}/namespaces/{namespace}/views/{view}");
+
+  auto rename_view = Endpoint::RenameView();
+  EXPECT_EQ(rename_view.method(), HttpMethod::kPost);
+  EXPECT_EQ(rename_view.path(), "/v1/{prefix}/views/rename");
+
+  // The server advertises endpoints as "METHOD /path" strings.
+  auto advertised =
+      Endpoint::FromString("GET /v1/{prefix}/namespaces/{namespace}/views/{view}");
+  ASSERT_TRUE(advertised.has_value());
+  EXPECT_EQ(*advertised, Endpoint::LoadView());
+  EXPECT_NE(*advertised, Endpoint::LoadTable());
+}
+
 TEST(EndpointTest, TableEndpoints) {
   auto list_tables = Endpoint::ListTables();
   EXPECT_EQ(list_tables.method(), HttpMethod::kGet);

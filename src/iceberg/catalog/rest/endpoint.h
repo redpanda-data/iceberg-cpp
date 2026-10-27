@@ -118,6 +118,29 @@ class ICEBERG_REST_EXPORT Endpoint {
             "/v1/{prefix}/namespaces/{namespace}/tables/{table}/credentials"};
   }
 
+  // View endpoints
+  static Endpoint ListViews() {
+    return {HttpMethod::kGet, "/v1/{prefix}/namespaces/{namespace}/views"};
+  }
+  static Endpoint LoadView() {
+    return {HttpMethod::kGet, "/v1/{prefix}/namespaces/{namespace}/views/{view}"};
+  }
+  static Endpoint ViewExists() {
+    return {HttpMethod::kHead, "/v1/{prefix}/namespaces/{namespace}/views/{view}"};
+  }
+  static Endpoint CreateView() {
+    return {HttpMethod::kPost, "/v1/{prefix}/namespaces/{namespace}/views"};
+  }
+  static Endpoint ReplaceView() {
+    return {HttpMethod::kPost, "/v1/{prefix}/namespaces/{namespace}/views/{view}"};
+  }
+  static Endpoint DeleteView() {
+    return {HttpMethod::kDelete, "/v1/{prefix}/namespaces/{namespace}/views/{view}"};
+  }
+  static Endpoint RenameView() {
+    return {HttpMethod::kPost, "/v1/{prefix}/views/rename"};
+  }
+
   // Transaction endpoints
   static Endpoint CommitTransaction() {
     return {HttpMethod::kPost, "/v1/{prefix}/transactions/commit"};

@@ -103,6 +103,23 @@ TEST(RestUtilTest, ResourcePathsRejectsEmptyNamespaceSeparator) {
   EXPECT_THAT(result, HasErrorMessage("REST namespace separator cannot be empty"));
 }
 
+TEST(RestUtilTest, ResourcePathsForViews) {
+  auto paths = ResourcePaths::Make("https://catalog.example.com", "prod", "%1F");
+  ASSERT_THAT(paths, IsOk());
+  const Namespace ns{.levels = {"a", "b"}};
+  const TableIdentifier ident{.ns = ns, .name = "my view"};
+
+  EXPECT_THAT(paths.value()->Views(ns),
+              HasValue(::testing::Eq(
+                  "https://catalog.example.com/v1/prod/namespaces/a%1Fb/views")));
+  EXPECT_THAT(paths.value()->View(ident),
+              HasValue(::testing::Eq("https://catalog.example.com/v1/prod/namespaces/"
+                                     "a%1Fb/views/my%20view")));
+  EXPECT_THAT(
+      paths.value()->RenameView(),
+      HasValue(::testing::Eq("https://catalog.example.com/v1/prod/views/rename")));
+}
+
 TEST(RestUtilTest, EncodeString) {
   // RFC 3986 unreserved characters should not be encoded
   EXPECT_THAT(EncodeString("abc123XYZ"), HasValue(::testing::Eq("abc123XYZ")));

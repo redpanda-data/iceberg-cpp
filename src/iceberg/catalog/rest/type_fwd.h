@@ -27,6 +27,8 @@ namespace iceberg::rest {
 struct ErrorResponse;
 struct CommitTableResponse;
 struct LoadTableResult;
+struct LoadViewResult;
+struct CommitViewRequest;
 struct OAuthTokenResponse;
 
 class Endpoint;

@@ -44,6 +44,8 @@
 #include "iceberg/util/data_file_set.h"
 #include "iceberg/util/json_util_internal.h"
 #include "iceberg/util/macros.h"
+#include "iceberg/view/view_metadata.h"
+#include "iceberg/view/view_update.h"
 
 namespace iceberg::rest {
 
@@ -65,6 +67,7 @@ constexpr std::string_view kSchema = "schema";
 constexpr std::string_view kPartitionSpec = "partition-spec";
 constexpr std::string_view kWriteOrder = "write-order";
 constexpr std::string_view kStageCreate = "stage-create";
+constexpr std::string_view kViewVersion = "view-version";
 constexpr std::string_view kMetadataLocation = "metadata-location";
 constexpr std::string_view kOverwrite = "overwrite";
 constexpr std::string_view kSource = "source";
@@ -756,6 +759,124 @@ Result<LoadTableResult> LoadTableResultFromJson(const nlohmann::json& json) {
   return result;
 }
 
+// CreateViewRequest
+Result<nlohmann::json> ToJson(const CreateViewRequest& request) {
+  nlohmann::json json;
+  json[kName] = request.name;
+  SetOptionalStringField(json, kLocation, request.location);
+  if (request.schema) {
+    ICEBERG_ASSIGN_OR_RAISE(json[kSchema], ToJson(*request.schema));
+  }
+  if (request.view_version) {
+    json[kViewVersion] = ToJson(*request.view_version);
+  }
+  json[kProperties] = request.properties;
+  return json;
+}
+
+Result<CreateViewRequest> CreateViewRequestFromJson(const nlohmann::json& json) {
+  CreateViewRequest request;
+  ICEBERG_ASSIGN_OR_RAISE(request.name, GetJsonValue<std::string>(json, kName));
+  ICEBERG_ASSIGN_OR_RAISE(request.location,
+                          GetJsonValueOrDefault<std::string>(json, kLocation));
+  ICEBERG_ASSIGN_OR_RAISE(auto schema, GetJsonValue<nlohmann::json>(json, kSchema));
+  ICEBERG_ASSIGN_OR_RAISE(request.schema, SchemaFromJson(schema));
+  ICEBERG_ASSIGN_OR_RAISE(auto view_version,
+                          GetJsonValue<nlohmann::json>(json, kViewVersion));
+  ICEBERG_ASSIGN_OR_RAISE(request.view_version, ViewVersionFromJson(view_version));
+  ICEBERG_ASSIGN_OR_RAISE(
+      request.properties,
+      GetJsonValueOrDefault<decltype(request.properties)>(json, kProperties));
+  ICEBERG_RETURN_UNEXPECTED(request.Validate());
+  return request;
+}
+
+// LoadViewResult (used by CreateViewResponse, LoadViewResponse)
+Result<nlohmann::json> ToJson(const LoadViewResult& result) {
+  nlohmann::json json;
+  json[kMetadataLocation] = result.metadata_location;
+  if (result.metadata) {
+    ICEBERG_ASSIGN_OR_RAISE(json[kMetadata], ToJson(*result.metadata));
+  }
+  SetContainerField(json, kConfig, result.config);
+  return json;
+}
+
+Result<LoadViewResult> LoadViewResultFromJson(const nlohmann::json& json) {
+  LoadViewResult result;
+  ICEBERG_ASSIGN_OR_RAISE(result.metadata_location,
+                          GetJsonValue<std::string>(json, kMetadataLocation));
+  ICEBERG_ASSIGN_OR_RAISE(auto metadata_json,
+                          GetJsonValue<nlohmann::json>(json, kMetadata));
+  ICEBERG_ASSIGN_OR_RAISE(result.metadata, ViewMetadataFromJson(metadata_json));
+  ICEBERG_ASSIGN_OR_RAISE(result.config,
+                          GetJsonValueOrDefault<decltype(result.config)>(json, kConfig));
+  ICEBERG_RETURN_UNEXPECTED(result.Validate());
+  return result;
+}
+
+// CommitViewRequest
+Result<nlohmann::json> ToJson(const CommitViewRequest& request) {
+  nlohmann::json json;
+  if (!request.identifier.name.empty()) {
+    json[kIdentifier] = ToJson(request.identifier);
+  }
+  nlohmann::json requirements = nlohmann::json::array();
+  for (const auto& requirement : request.requirements) {
+    if (requirement != nullptr) {
+      requirements.push_back(ToJson(*requirement));
+    }
+  }
+  json[kRequirements] = std::move(requirements);
+  nlohmann::json updates = nlohmann::json::array();
+  for (const auto& update : request.updates) {
+    if (update != nullptr) {
+      ICEBERG_ASSIGN_OR_RAISE(auto update_json, ToJson(*update));
+      updates.push_back(std::move(update_json));
+    }
+  }
+  json[kUpdates] = std::move(updates);
+  return json;
+}
+
+Result<CommitViewRequest> CommitViewRequestFromJson(const nlohmann::json& json) {
+  CommitViewRequest request;
+  if (json.contains(kIdentifier)) {
+    ICEBERG_ASSIGN_OR_RAISE(auto identifier_json,
+                            GetJsonValue<nlohmann::json>(json, kIdentifier));
+    ICEBERG_ASSIGN_OR_RAISE(request.identifier, TableIdentifierFromJson(identifier_json));
+  }
+
+  ICEBERG_ASSIGN_OR_RAISE(auto requirements_json,
+                          GetJsonValueOptional<nlohmann::json>(json, kRequirements));
+  if (requirements_json.has_value()) {
+    if (!requirements_json->is_array()) {
+      return JsonParseError("Expected '{}' to be an array, got {}", kRequirements,
+                            SafeDumpJson(*requirements_json));
+    }
+    for (const auto& req_json : *requirements_json) {
+      ICEBERG_ASSIGN_OR_RAISE(auto requirement, ViewRequirementFromJson(req_json));
+      request.requirements.push_back(std::move(requirement));
+    }
+  }
+
+  ICEBERG_ASSIGN_OR_RAISE(auto updates_json,
+                          GetJsonValueOptional<nlohmann::json>(json, kUpdates));
+  if (updates_json.has_value()) {
+    if (!updates_json->is_array()) {
+      return JsonParseError("Expected '{}' to be an array, got {}", kUpdates,
+                            SafeDumpJson(*updates_json));
+    }
+    for (const auto& update_json : *updates_json) {
+      ICEBERG_ASSIGN_OR_RAISE(auto update, ViewUpdateFromJson(update_json));
+      request.updates.push_back(std::move(update));
+    }
+  }
+
+  ICEBERG_RETURN_UNEXPECTED(request.Validate());
+  return request;
+}
+
 nlohmann::json ToJson(const ListNamespacesResponse& response) {
   nlohmann::json json;
   SetOptionalStringField(json, kNextPageToken, response.next_page_token);
@@ -1222,6 +1343,9 @@ ICEBERG_DEFINE_FROM_JSON(RenameTableRequest)
 ICEBERG_DEFINE_FROM_JSON(CreateTableRequest)
 ICEBERG_DEFINE_FROM_JSON(CommitTableRequest)
 ICEBERG_DEFINE_FROM_JSON(CommitTableResponse)
+ICEBERG_DEFINE_FROM_JSON(CreateViewRequest)
+ICEBERG_DEFINE_FROM_JSON(LoadViewResult)
+ICEBERG_DEFINE_FROM_JSON(CommitViewRequest)
 ICEBERG_DEFINE_FROM_JSON(OAuthTokenResponse)
 ICEBERG_DEFINE_FROM_JSON(PlanTableScanRequest)
 ICEBERG_DEFINE_FROM_JSON(FetchScanTasksRequest)
