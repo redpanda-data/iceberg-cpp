@@ -126,6 +126,7 @@ add_iceberg_test(json_serde_test
                  SOURCES
                  json_serde_test.cc
                  metadata_serde_test.cc
+                 view_metadata_serde_test.cc
                  schema_json_test.cc)
 
 add_iceberg_test(util_test

@@ -142,6 +142,12 @@ struct SnapshotLogEntry;
 struct SnapshotRef;
 struct StatisticsFile;
 struct TableMetadata;
+struct ViewHistoryEntry;
+struct ViewMetadata;
+struct ViewRepresentation;
+struct ViewVersion;
+class ViewRequirement;
+class ViewUpdate;
 class InheritableMetadata;
 class SnapshotSummaryBuilder;
 

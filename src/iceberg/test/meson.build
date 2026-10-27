@@ -89,6 +89,7 @@ iceberg_tests = {
             'json_serde_test.cc',
             'metadata_serde_test.cc',
             'schema_json_test.cc',
+            'view_metadata_serde_test.cc',
         ),
     },
     'util_test': {

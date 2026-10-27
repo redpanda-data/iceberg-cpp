@@ -168,6 +168,8 @@ iceberg_sources = files(
     'util/type_util.cc',
     'util/url_encoder.cc',
     'util/uuid.cc',
+    'view/view_metadata.cc',
+    'view/view_update.cc',
 )
 
 iceberg_data_sources = files(
@@ -314,6 +316,7 @@ subdir('puffin')
 subdir('row')
 subdir('update')
 subdir('util')
+subdir('view')
 subdir('inspect')
 
 if get_option('tests').enabled()

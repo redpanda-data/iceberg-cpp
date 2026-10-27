@@ -33,6 +33,7 @@
 #include "iceberg/statistics_file.h"
 #include "iceberg/table_metadata.h"
 #include "iceberg/type_fwd.h"
+#include "iceberg/view/view_metadata.h"
 
 namespace iceberg {
 
@@ -424,6 +425,94 @@ ICEBERG_EXPORT nlohmann::json ToJson(const TableRequirement& requirement);
 /// \param json The JSON object representing a `TableRequirement`.
 /// \return A `TableRequirement` object or an error if the conversion fails.
 ICEBERG_EXPORT Result<std::unique_ptr<TableRequirement>> TableRequirementFromJson(
+    const nlohmann::json& json);
+
+/// \brief Serializes a `ViewRepresentation` object to JSON.
+///
+/// \param representation The `ViewRepresentation` object to be serialized.
+/// \return A JSON object representing the `ViewRepresentation`.
+ICEBERG_EXPORT nlohmann::json ToJson(const ViewRepresentation& representation);
+
+/// \brief Deserializes a JSON object into a `ViewRepresentation` object.
+///
+/// \param json The JSON object representing a `ViewRepresentation`.
+/// \return A `ViewRepresentation` object or an error if the conversion fails.
+ICEBERG_EXPORT Result<ViewRepresentation> ViewRepresentationFromJson(
+    const nlohmann::json& json);
+
+/// \brief Serializes a `ViewHistoryEntry` object to JSON.
+///
+/// \param entry The `ViewHistoryEntry` object to be serialized.
+/// \return A JSON object representing the `ViewHistoryEntry`.
+ICEBERG_EXPORT nlohmann::json ToJson(const ViewHistoryEntry& entry);
+
+/// \brief Deserializes a JSON object into a `ViewHistoryEntry` object.
+///
+/// \param json The JSON object representing a `ViewHistoryEntry`.
+/// \return A `ViewHistoryEntry` object or an error if the conversion fails.
+ICEBERG_EXPORT Result<ViewHistoryEntry> ViewHistoryEntryFromJson(
+    const nlohmann::json& json);
+
+/// \brief Serializes a `ViewVersion` object to JSON.
+///
+/// The `storage-table` field is written only when the version has a storage table.
+///
+/// \param version The `ViewVersion` object to be serialized.
+/// \return A JSON object representing the `ViewVersion`.
+ICEBERG_EXPORT nlohmann::json ToJson(const ViewVersion& version);
+
+/// \brief Deserializes a JSON object into a `ViewVersion` object.
+///
+/// \param json The JSON object representing a `ViewVersion`.
+/// \return A `ViewVersion` object or an error if the conversion fails.
+ICEBERG_EXPORT Result<std::unique_ptr<ViewVersion>> ViewVersionFromJson(
+    const nlohmann::json& json);
+
+/// \brief Serializes a `ViewMetadata` object to JSON.
+///
+/// \param view_metadata The `ViewMetadata` object to be serialized.
+/// \return A JSON object representing the `ViewMetadata`.
+ICEBERG_EXPORT Result<nlohmann::json> ToJson(const ViewMetadata& view_metadata);
+
+/// \brief Serializes a `ViewMetadata` object to JSON.
+///
+/// \param view_metadata The `ViewMetadata` object to be serialized.
+/// \return A JSON string of the `ViewMetadata`.
+ICEBERG_EXPORT Result<std::string> ToJsonString(const ViewMetadata& view_metadata);
+
+/// \brief Deserializes a JSON object into a `ViewMetadata` object.
+///
+/// Unknown fields are ignored.
+///
+/// \param json The JSON object representing a `ViewMetadata`.
+/// \return A `ViewMetadata` object or an error if the conversion fails.
+ICEBERG_EXPORT Result<std::unique_ptr<ViewMetadata>> ViewMetadataFromJson(
+    const nlohmann::json& json);
+
+/// \brief Serializes a `ViewUpdate` object to JSON.
+///
+/// \param update The `ViewUpdate` object to be serialized.
+/// \return A JSON object representing the `ViewUpdate`.
+ICEBERG_EXPORT Result<nlohmann::json> ToJson(const ViewUpdate& update);
+
+/// \brief Deserializes a JSON object into a `ViewUpdate` object.
+///
+/// \param json The JSON object representing a `ViewUpdate`.
+/// \return A `ViewUpdate` object or an error if the conversion fails.
+ICEBERG_EXPORT Result<std::unique_ptr<ViewUpdate>> ViewUpdateFromJson(
+    const nlohmann::json& json);
+
+/// \brief Serializes a `ViewRequirement` object to JSON.
+///
+/// \param requirement The `ViewRequirement` object to be serialized.
+/// \return A JSON object representing the `ViewRequirement`.
+ICEBERG_EXPORT nlohmann::json ToJson(const ViewRequirement& requirement);
+
+/// \brief Deserializes a JSON object into a `ViewRequirement` object.
+///
+/// \param json The JSON object representing a `ViewRequirement`.
+/// \return A `ViewRequirement` object or an error if the conversion fails.
+ICEBERG_EXPORT Result<std::unique_ptr<ViewRequirement>> ViewRequirementFromJson(
     const nlohmann::json& json);
 
 }  // namespace iceberg

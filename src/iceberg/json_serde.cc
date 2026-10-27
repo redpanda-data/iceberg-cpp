@@ -53,6 +53,8 @@
 #include "iceberg/util/string_util.h"
 #include "iceberg/util/temporal_util.h"
 #include "iceberg/util/timepoint.h"
+#include "iceberg/view/view_metadata.h"
+#include "iceberg/view/view_update.h"
 
 namespace iceberg {
 
@@ -180,6 +182,24 @@ constexpr std::string_view kStatisticsPath = "statistics-path";
 constexpr std::string_view kFileSizeInBytes = "file-size-in-bytes";
 constexpr std::string_view kFileFooterSizeInBytes = "file-footer-size-in-bytes";
 constexpr std::string_view kBlobMetadata = "blob-metadata";
+
+// View metadata
+constexpr std::string_view kViewUuid = "view-uuid";
+constexpr std::string_view kCurrentVersionId = "current-version-id";
+constexpr std::string_view kVersions = "versions";
+constexpr std::string_view kVersionLog = "version-log";
+constexpr std::string_view kVersionId = "version-id";
+constexpr std::string_view kRepresentations = "representations";
+constexpr std::string_view kDefaultCatalog = "default-catalog";
+constexpr std::string_view kDefaultNamespace = "default-namespace";
+constexpr std::string_view kStorageTable = "storage-table";
+constexpr std::string_view kSql = "sql";
+constexpr std::string_view kDialect = "dialect";
+constexpr std::string_view kViewVersion = "view-version";
+constexpr std::string_view kViewVersionId = "view-version-id";
+constexpr std::string_view kActionAddViewVersion = "add-view-version";
+constexpr std::string_view kActionSetCurrentViewVersion = "set-current-view-version";
+constexpr std::string_view kRequirementAssertViewUUID = "assert-view-uuid";
 
 // TableUpdate action constants
 constexpr std::string_view kAction = "action";
@@ -1983,6 +2003,322 @@ Result<std::unique_ptr<TableRequirement>> TableRequirementFromJson(
   }
 
   return JsonParseError("Unknown table requirement type: {}", type);
+}
+
+nlohmann::json ToJson(const ViewRepresentation& representation) {
+  nlohmann::json json;
+  json[kType] = representation.type;
+  if (representation.type == ViewRepresentation::kSqlType) {
+    json[kSql] = representation.sql;
+    json[kDialect] = representation.dialect;
+  }
+  return json;
+}
+
+Result<ViewRepresentation> ViewRepresentationFromJson(const nlohmann::json& json) {
+  if (!json.is_object()) {
+    return JsonParseError("Cannot parse view representation from a non-object: {}",
+                          SafeDumpJson(json));
+  }
+  ViewRepresentation representation;
+  ICEBERG_ASSIGN_OR_RAISE(representation.type, GetJsonValue<std::string>(json, kType));
+  if (representation.type == ViewRepresentation::kSqlType) {
+    ICEBERG_ASSIGN_OR_RAISE(representation.sql, GetJsonValue<std::string>(json, kSql));
+    ICEBERG_ASSIGN_OR_RAISE(representation.dialect,
+                            GetJsonValue<std::string>(json, kDialect));
+  }
+  return representation;
+}
+
+nlohmann::json ToJson(const ViewHistoryEntry& entry) {
+  nlohmann::json json;
+  json[kTimestampMs] = UnixMsFromTimePointMs(entry.timestamp_ms);
+  json[kVersionId] = entry.version_id;
+  return json;
+}
+
+Result<ViewHistoryEntry> ViewHistoryEntryFromJson(const nlohmann::json& json) {
+  ViewHistoryEntry entry;
+  ICEBERG_ASSIGN_OR_RAISE(auto unix_ms, GetJsonValue<int64_t>(json, kTimestampMs));
+  entry.timestamp_ms = TimePointMsFromUnixMs(unix_ms);
+  ICEBERG_ASSIGN_OR_RAISE(entry.version_id, GetJsonValue<int32_t>(json, kVersionId));
+  return entry;
+}
+
+nlohmann::json ToJson(const ViewVersion& version) {
+  nlohmann::json json;
+  json[kVersionId] = version.version_id;
+  json[kTimestampMs] = UnixMsFromTimePointMs(version.timestamp_ms);
+  json[kSchemaId] = version.schema_id;
+  json[kSummary] = version.summary;
+  SetOptionalField(json, kDefaultCatalog, version.default_catalog);
+  json[kDefaultNamespace] = ToJson(version.default_namespace);
+  nlohmann::json representations = nlohmann::json::array();
+  for (const auto& representation : version.representations) {
+    representations.push_back(ToJson(representation));
+  }
+  json[kRepresentations] = std::move(representations);
+  if (version.storage_table.has_value()) {
+    json[kStorageTable] = ToJson(*version.storage_table);
+  }
+  return json;
+}
+
+Result<std::unique_ptr<ViewVersion>> ViewVersionFromJson(const nlohmann::json& json) {
+  if (!json.is_object()) {
+    return JsonParseError("Cannot parse view version from a non-object: {}",
+                          SafeDumpJson(json));
+  }
+  auto version = std::make_unique<ViewVersion>();
+  ICEBERG_ASSIGN_OR_RAISE(version->version_id, GetJsonValue<int32_t>(json, kVersionId));
+  ICEBERG_ASSIGN_OR_RAISE(auto unix_ms, GetJsonValue<int64_t>(json, kTimestampMs));
+  version->timestamp_ms = TimePointMsFromUnixMs(unix_ms);
+  ICEBERG_ASSIGN_OR_RAISE(version->schema_id, GetJsonValue<int32_t>(json, kSchemaId));
+  if (!json.contains(kSummary)) {
+    return JsonParseError("Missing '{}' in view version: {}", kSummary,
+                          SafeDumpJson(json));
+  }
+  ICEBERG_ASSIGN_OR_RAISE(version->summary, FromJsonMap(json, kSummary));
+  ICEBERG_ASSIGN_OR_RAISE(version->default_catalog,
+                          GetJsonValueOptional<std::string>(json, kDefaultCatalog));
+  ICEBERG_ASSIGN_OR_RAISE(auto default_namespace,
+                          GetJsonValue<nlohmann::json>(json, kDefaultNamespace));
+  ICEBERG_ASSIGN_OR_RAISE(version->default_namespace,
+                          NamespaceFromJson(default_namespace));
+  if (!json.contains(kRepresentations)) {
+    return JsonParseError("Missing '{}' in view version: {}", kRepresentations,
+                          SafeDumpJson(json));
+  }
+  ICEBERG_ASSIGN_OR_RAISE(version->representations,
+                          FromJsonList<ViewRepresentation>(json, kRepresentations,
+                                                           ViewRepresentationFromJson));
+  if (auto it = json.find(kStorageTable); it != json.end() && !it->is_null()) {
+    ICEBERG_ASSIGN_OR_RAISE(version->storage_table, TableIdentifierFromJson(*it));
+  }
+  return version;
+}
+
+Result<nlohmann::json> ToJson(const ViewMetadata& view_metadata) {
+  nlohmann::json json;
+  json[kViewUuid] = view_metadata.view_uuid;
+  json[kFormatVersion] = view_metadata.format_version;
+  json[kLocation] = view_metadata.location;
+  json[kCurrentVersionId] = view_metadata.current_version_id;
+  json[kProperties] = view_metadata.properties;
+
+  nlohmann::json versions = nlohmann::json::array();
+  for (const auto& version : view_metadata.versions) {
+    if (version != nullptr) {
+      versions.push_back(ToJson(*version));
+    }
+  }
+  json[kVersions] = std::move(versions);
+
+  nlohmann::json schemas = nlohmann::json::array();
+  for (const auto& schema : view_metadata.schemas) {
+    if (schema != nullptr) {
+      ICEBERG_ASSIGN_OR_RAISE(auto schema_json, ToJson(*schema));
+      schemas.push_back(std::move(schema_json));
+    }
+  }
+  json[kSchemas] = std::move(schemas);
+
+  nlohmann::json version_log = nlohmann::json::array();
+  for (const auto& entry : view_metadata.version_log) {
+    version_log.push_back(ToJson(entry));
+  }
+  json[kVersionLog] = std::move(version_log);
+  return json;
+}
+
+Result<std::string> ToJsonString(const ViewMetadata& view_metadata) {
+  ICEBERG_ASSIGN_OR_RAISE(auto json, ToJson(view_metadata));
+  return ToJsonString(json);
+}
+
+Result<std::unique_ptr<ViewMetadata>> ViewMetadataFromJson(const nlohmann::json& json) {
+  if (!json.is_object()) {
+    return JsonParseError("Cannot parse view metadata from a non-object: {}",
+                          SafeDumpJson(json));
+  }
+
+  auto view_metadata = std::make_unique<ViewMetadata>();
+  ICEBERG_ASSIGN_OR_RAISE(view_metadata->format_version,
+                          GetJsonValue<int8_t>(json, kFormatVersion));
+  if (view_metadata->format_version != ViewMetadata::kSupportedViewFormatVersion) {
+    return JsonParseError("Cannot read unsupported view format version: {}",
+                          view_metadata->format_version);
+  }
+  ICEBERG_ASSIGN_OR_RAISE(view_metadata->view_uuid,
+                          GetJsonValue<std::string>(json, kViewUuid));
+  ICEBERG_ASSIGN_OR_RAISE(view_metadata->location,
+                          GetJsonValue<std::string>(json, kLocation));
+  ICEBERG_ASSIGN_OR_RAISE(view_metadata->current_version_id,
+                          GetJsonValue<int32_t>(json, kCurrentVersionId));
+  ICEBERG_ASSIGN_OR_RAISE(view_metadata->properties, FromJsonMap(json, kProperties));
+
+  for (std::string_view key : {kSchemas, kVersions, kVersionLog}) {
+    if (!json.contains(key)) {
+      return JsonParseError("Missing '{}' in view metadata: {}", key, SafeDumpJson(json));
+    }
+  }
+  ICEBERG_ASSIGN_OR_RAISE(view_metadata->schemas,
+                          FromJsonList<Schema>(json, kSchemas, SchemaFromJson));
+  ICEBERG_ASSIGN_OR_RAISE(
+      view_metadata->versions,
+      FromJsonList<ViewVersion>(json, kVersions, ViewVersionFromJson));
+  ICEBERG_ASSIGN_OR_RAISE(
+      view_metadata->version_log,
+      FromJsonList<ViewHistoryEntry>(json, kVersionLog, ViewHistoryEntryFromJson));
+
+  auto current_version = view_metadata->CurrentVersion();
+  if (!current_version.has_value()) {
+    return JsonParseError("Cannot find version with {}={} from {}", kCurrentVersionId,
+                          view_metadata->current_version_id, SafeDumpJson(json));
+  }
+  if (auto schema = view_metadata->SchemaById(current_version.value()->schema_id);
+      !schema.has_value()) {
+    return JsonParseError("Cannot find schema with {}={} from {}", kSchemaId,
+                          current_version.value()->schema_id, SafeDumpJson(json));
+  }
+  return view_metadata;
+}
+
+Result<nlohmann::json> ToJson(const ViewUpdate& update) {
+  nlohmann::json json;
+  switch (update.kind()) {
+    case ViewUpdate::Kind::kAssignUUID: {
+      const auto& u = internal::checked_cast<const view::AssignUUID&>(update);
+      json[kAction] = kActionAssignUUID;
+      json[kUUID] = u.uuid();
+      break;
+    }
+    case ViewUpdate::Kind::kUpgradeFormatVersion: {
+      const auto& u = internal::checked_cast<const view::UpgradeFormatVersion&>(update);
+      json[kAction] = kActionUpgradeFormatVersion;
+      json[kFormatVersion] = u.format_version();
+      break;
+    }
+    case ViewUpdate::Kind::kAddSchema: {
+      const auto& u = internal::checked_cast<const view::AddSchema&>(update);
+      json[kAction] = kActionAddSchema;
+      if (u.schema() == nullptr) {
+        return InvalidArgument("Cannot serialize add-schema update without a schema");
+      }
+      ICEBERG_ASSIGN_OR_RAISE(json[kSchema], ToJson(*u.schema()));
+      break;
+    }
+    case ViewUpdate::Kind::kSetLocation: {
+      const auto& u = internal::checked_cast<const view::SetLocation&>(update);
+      json[kAction] = kActionSetLocation;
+      json[kLocation] = u.location();
+      break;
+    }
+    case ViewUpdate::Kind::kSetProperties: {
+      const auto& u = internal::checked_cast<const view::SetProperties&>(update);
+      json[kAction] = kActionSetProperties;
+      json[kUpdates] = u.updated();
+      break;
+    }
+    case ViewUpdate::Kind::kRemoveProperties: {
+      const auto& u = internal::checked_cast<const view::RemoveProperties&>(update);
+      json[kAction] = kActionRemoveProperties;
+      json[kRemovals] = u.removed();
+      break;
+    }
+    case ViewUpdate::Kind::kAddViewVersion: {
+      const auto& u = internal::checked_cast<const view::AddViewVersion&>(update);
+      json[kAction] = kActionAddViewVersion;
+      if (u.view_version() == nullptr) {
+        return InvalidArgument(
+            "Cannot serialize add-view-version update without a view version");
+      }
+      json[kViewVersion] = ToJson(*u.view_version());
+      break;
+    }
+    case ViewUpdate::Kind::kSetCurrentViewVersion: {
+      const auto& u = internal::checked_cast<const view::SetCurrentViewVersion&>(update);
+      json[kAction] = kActionSetCurrentViewVersion;
+      json[kViewVersionId] = u.view_version_id();
+      break;
+    }
+  }
+  return json;
+}
+
+Result<std::unique_ptr<ViewUpdate>> ViewUpdateFromJson(const nlohmann::json& json) {
+  if (!json.is_object()) {
+    return JsonParseError("Cannot parse view update from a non-object: {}",
+                          SafeDumpJson(json));
+  }
+  ICEBERG_ASSIGN_OR_RAISE(auto action, GetJsonValue<std::string>(json, kAction));
+  if (action == kActionAssignUUID) {
+    ICEBERG_ASSIGN_OR_RAISE(auto uuid, GetJsonValue<std::string>(json, kUUID));
+    return std::make_unique<view::AssignUUID>(std::move(uuid));
+  }
+  if (action == kActionUpgradeFormatVersion) {
+    ICEBERG_ASSIGN_OR_RAISE(auto format_version,
+                            GetJsonValue<int8_t>(json, kFormatVersion));
+    return std::make_unique<view::UpgradeFormatVersion>(format_version);
+  }
+  if (action == kActionAddSchema) {
+    ICEBERG_ASSIGN_OR_RAISE(auto schema_json,
+                            GetJsonValue<nlohmann::json>(json, kSchema));
+    ICEBERG_ASSIGN_OR_RAISE(std::shared_ptr<Schema> schema, SchemaFromJson(schema_json));
+    return std::make_unique<view::AddSchema>(std::move(schema));
+  }
+  if (action == kActionSetLocation) {
+    ICEBERG_ASSIGN_OR_RAISE(auto location, GetJsonValue<std::string>(json, kLocation));
+    return std::make_unique<view::SetLocation>(std::move(location));
+  }
+  if (action == kActionSetProperties) {
+    ICEBERG_ASSIGN_OR_RAISE(auto updates, FromJsonMap(json, kUpdates));
+    return std::make_unique<view::SetProperties>(std::move(updates));
+  }
+  if (action == kActionRemoveProperties) {
+    ICEBERG_ASSIGN_OR_RAISE(
+        auto removals, GetJsonValue<std::unordered_set<std::string>>(json, kRemovals));
+    return std::make_unique<view::RemoveProperties>(std::move(removals));
+  }
+  if (action == kActionAddViewVersion) {
+    ICEBERG_ASSIGN_OR_RAISE(auto version_json,
+                            GetJsonValue<nlohmann::json>(json, kViewVersion));
+    ICEBERG_ASSIGN_OR_RAISE(std::shared_ptr<ViewVersion> version,
+                            ViewVersionFromJson(version_json));
+    return std::make_unique<view::AddViewVersion>(std::move(version));
+  }
+  if (action == kActionSetCurrentViewVersion) {
+    ICEBERG_ASSIGN_OR_RAISE(auto version_id, GetJsonValue<int32_t>(json, kViewVersionId));
+    return std::make_unique<view::SetCurrentViewVersion>(version_id);
+  }
+  return JsonParseError("Unknown view update action: {}", action);
+}
+
+nlohmann::json ToJson(const ViewRequirement& requirement) {
+  nlohmann::json json;
+  switch (requirement.kind()) {
+    case ViewRequirement::Kind::kAssertViewUUID: {
+      const auto& r = internal::checked_cast<const view::AssertViewUUID&>(requirement);
+      json[kType] = kRequirementAssertViewUUID;
+      json[kUUID] = r.uuid();
+      break;
+    }
+  }
+  return json;
+}
+
+Result<std::unique_ptr<ViewRequirement>> ViewRequirementFromJson(
+    const nlohmann::json& json) {
+  if (!json.is_object()) {
+    return JsonParseError("Cannot parse view requirement from a non-object: {}",
+                          SafeDumpJson(json));
+  }
+  ICEBERG_ASSIGN_OR_RAISE(auto type, GetJsonValue<std::string>(json, kType));
+  if (type == kRequirementAssertViewUUID) {
+    ICEBERG_ASSIGN_OR_RAISE(auto uuid, GetJsonValue<std::string>(json, kUUID));
+    return std::make_unique<view::AssertViewUUID>(std::move(uuid));
+  }
+  return JsonParseError("Unknown view requirement type: {}", type);
 }
 
 }  // namespace iceberg
