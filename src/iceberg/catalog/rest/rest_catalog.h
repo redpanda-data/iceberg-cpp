@@ -69,6 +69,9 @@ class ICEBERG_REST_EXPORT RestCatalog final
 
   Result<std::shared_ptr<Catalog>> WithContext(SessionContext context) override;
 
+  /// \brief Whether the server advertises the view endpoints (list, load, create, drop).
+  bool SupportsViews() const;
+
  private:
   class ContextCatalog;
   class TableScopedCatalog;
@@ -158,6 +161,35 @@ class ICEBERG_REST_EXPORT RestCatalog final
 
   Result<LoadTableResult> LoadTableInternal(const TableIdentifier& identifier,
                                             auth::AuthSession& session) const;
+
+  Result<std::vector<TableIdentifier>> ListViews(const Namespace& ns,
+                                                 auth::AuthSession& session) const;
+
+  Result<LoadViewResult> LoadViewInternal(const TableIdentifier& identifier,
+                                          auth::AuthSession& session) const;
+
+  Result<std::shared_ptr<ViewMetadata>> LoadView(const TableIdentifier& identifier,
+                                                 auth::AuthSession& session) const;
+
+  Result<std::shared_ptr<ViewMetadata>> CreateView(
+      const TableIdentifier& identifier, const ViewVersion& version,
+      const std::shared_ptr<Schema>& schema, const std::string& location,
+      const std::unordered_map<std::string, std::string>& properties,
+      auth::AuthSession& session);
+
+  Result<std::shared_ptr<ViewMetadata>> ReplaceView(
+      const TableIdentifier& identifier,
+      const std::vector<std::unique_ptr<ViewRequirement>>& requirements,
+      const std::vector<std::unique_ptr<ViewUpdate>>& updates,
+      auth::AuthSession& session);
+
+  Result<bool> ViewExists(const TableIdentifier& identifier,
+                          auth::AuthSession& session) const;
+
+  Status DropView(const TableIdentifier& identifier, auth::AuthSession& session);
+
+  Status RenameView(const TableIdentifier& from, const TableIdentifier& to,
+                    auth::AuthSession& session);
 
   Result<LoadTableResult> CreateTableInternal(
       const TableIdentifier& identifier, const std::shared_ptr<Schema>& schema,

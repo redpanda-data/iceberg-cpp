@@ -53,6 +53,8 @@
 #include "iceberg/transaction.h"
 #include "iceberg/util/formatter_internal.h"
 #include "iceberg/util/macros.h"
+#include "iceberg/view/view_metadata.h"
+#include "iceberg/view/view_update.h"
 
 namespace iceberg::rest {
 
@@ -62,13 +64,29 @@ namespace {
 /// iceberg rest spec.
 std::unordered_set<Endpoint> GetDefaultEndpoints() {
   return {
-      Endpoint::ListNamespaces(),  Endpoint::GetNamespaceProperties(),
-      Endpoint::CreateNamespace(), Endpoint::UpdateNamespace(),
-      Endpoint::DropNamespace(),   Endpoint::ListTables(),
-      Endpoint::LoadTable(),       Endpoint::CreateTable(),
-      Endpoint::UpdateTable(),     Endpoint::DeleteTable(),
-      Endpoint::RenameTable(),     Endpoint::RegisterTable(),
-      Endpoint::ReportMetrics(),   Endpoint::CommitTransaction(),
+      Endpoint::ListNamespaces(),
+      Endpoint::GetNamespaceProperties(),
+      Endpoint::CreateNamespace(),
+      Endpoint::UpdateNamespace(),
+      Endpoint::DropNamespace(),
+      Endpoint::ListTables(),
+      Endpoint::LoadTable(),
+      Endpoint::CreateTable(),
+      Endpoint::UpdateTable(),
+      Endpoint::DeleteTable(),
+      Endpoint::RenameTable(),
+      Endpoint::RegisterTable(),
+      Endpoint::ReportMetrics(),
+      Endpoint::CommitTransaction(),
+      // View endpoints are assumed for servers that do not advertise their endpoints,
+      // the same default the Java REST catalog applies.
+      Endpoint::ListViews(),
+      Endpoint::LoadView(),
+      Endpoint::ViewExists(),
+      Endpoint::CreateView(),
+      Endpoint::ReplaceView(),
+      Endpoint::DeleteView(),
+      Endpoint::RenameView(),
   };
 }
 
@@ -105,7 +123,8 @@ Result<CatalogConfig> FetchServerConfig(const ResourcePaths& paths,
   } while (0)
 
 Result<bool> CaptureNoSuchObject(const auto& status, ErrorKind kind) {
-  ICEBERG_DCHECK(kind == ErrorKind::kNoSuchTable || kind == ErrorKind::kNoSuchNamespace,
+  ICEBERG_DCHECK(kind == ErrorKind::kNoSuchTable || kind == ErrorKind::kNoSuchNamespace ||
+                     kind == ErrorKind::kNoSuchView,
                  "Invalid kind for CaptureNoSuchObject");
   if (status.has_value()) {
     return true;
@@ -122,6 +141,10 @@ Result<bool> CaptureNoSuchTable(const auto& status) {
 
 Result<bool> CaptureNoSuchNamespace(const auto& status) {
   return CaptureNoSuchObject(status, ErrorKind::kNoSuchNamespace);
+}
+
+Result<bool> CaptureNoSuchView(const auto& status) {
+  return CaptureNoSuchObject(status, ErrorKind::kNoSuchView);
 }
 
 Status CheckBoundTable(const TableIdentifier& requested, const TableIdentifier& bound) {
@@ -238,6 +261,48 @@ class RestCatalog::ContextCatalog final
     ICEBERG_ASSIGN_OR_RAISE(auto session, root_->ContextualAuthSession(context_));
     return root_->RegisterTable(identifier, metadata_file_location, context_,
                                 std::move(session));
+  }
+
+  Result<std::vector<TableIdentifier>> ListViews(const Namespace& ns) const override {
+    ICEBERG_ASSIGN_OR_RAISE(auto session, root_->ContextualAuthSession(context_));
+    return root_->ListViews(ns, *session);
+  }
+
+  Result<std::shared_ptr<ViewMetadata>> LoadView(
+      const TableIdentifier& identifier) override {
+    ICEBERG_ASSIGN_OR_RAISE(auto session, root_->ContextualAuthSession(context_));
+    return root_->LoadView(identifier, *session);
+  }
+
+  Result<std::shared_ptr<ViewMetadata>> CreateView(
+      const TableIdentifier& identifier, const ViewVersion& version,
+      const std::shared_ptr<Schema>& schema, const std::string& location,
+      const std::unordered_map<std::string, std::string>& properties) override {
+    ICEBERG_ASSIGN_OR_RAISE(auto session, root_->ContextualAuthSession(context_));
+    return root_->CreateView(identifier, version, schema, location, properties, *session);
+  }
+
+  Result<std::shared_ptr<ViewMetadata>> ReplaceView(
+      const TableIdentifier& identifier,
+      const std::vector<std::unique_ptr<ViewRequirement>>& requirements,
+      const std::vector<std::unique_ptr<ViewUpdate>>& updates) override {
+    ICEBERG_ASSIGN_OR_RAISE(auto session, root_->ContextualAuthSession(context_));
+    return root_->ReplaceView(identifier, requirements, updates, *session);
+  }
+
+  Result<bool> ViewExists(const TableIdentifier& identifier) const override {
+    ICEBERG_ASSIGN_OR_RAISE(auto session, root_->ContextualAuthSession(context_));
+    return root_->ViewExists(identifier, *session);
+  }
+
+  Status DropView(const TableIdentifier& identifier) override {
+    ICEBERG_ASSIGN_OR_RAISE(auto session, root_->ContextualAuthSession(context_));
+    return root_->DropView(identifier, *session);
+  }
+
+  Status RenameView(const TableIdentifier& from, const TableIdentifier& to) override {
+    ICEBERG_ASSIGN_OR_RAISE(auto session, root_->ContextualAuthSession(context_));
+    return root_->RenameView(from, to, *session);
   }
 
  private:
@@ -470,6 +535,16 @@ RestCatalog::RestCatalog(RestCatalogProperties config, std::shared_ptr<FileIO> f
 }
 
 std::string_view RestCatalog::name() const { return name_; }
+
+bool RestCatalog::SupportsViews() const {
+  for (const auto& endpoint : {Endpoint::ListViews(), Endpoint::LoadView(),
+                               Endpoint::CreateView(), Endpoint::DeleteView()}) {
+    if (!supported_endpoints_.contains(endpoint)) {
+      return false;
+    }
+  }
+  return true;
+}
 
 Result<std::shared_ptr<Catalog>> RestCatalog::AsCatalog() {
   if (auto catalog = default_catalog_.lock()) {
@@ -860,6 +935,139 @@ Result<std::shared_ptr<Table>> RestCatalog::RegisterTable(
   ICEBERG_ASSIGN_OR_RAISE(auto load_result, LoadTableResultFromJson(json));
   return MakeTableFromLoadResult(identifier, std::move(load_result), context,
                                  std::move(contextual_session));
+}
+
+Result<std::vector<TableIdentifier>> RestCatalog::ListViews(
+    const Namespace& ns, auth::AuthSession& session) const {
+  ICEBERG_ENDPOINT_CHECK(supported_endpoints_, Endpoint::ListViews());
+  ICEBERG_ASSIGN_OR_RAISE(auto path, paths_->Views(ns));
+  std::vector<TableIdentifier> result;
+  std::string next_token;
+  while (true) {
+    std::unordered_map<std::string, std::string> params;
+    if (!next_token.empty()) {
+      params[kQueryParamPageToken] = next_token;
+    }
+    ICEBERG_ASSIGN_OR_RAISE(const auto response,
+                            client_->Get(path, params, /*headers=*/{},
+                                         *ViewErrorHandler::Instance(), session));
+    ICEBERG_ASSIGN_OR_RAISE(auto json, FromJsonString(response.body()));
+    ICEBERG_ASSIGN_OR_RAISE(auto list_response, ListTablesResponseFromJson(json));
+    result.insert(result.end(), list_response.identifiers.begin(),
+                  list_response.identifiers.end());
+    if (list_response.next_page_token.empty()) {
+      return result;
+    }
+    next_token = std::move(list_response.next_page_token);
+  }
+  return result;
+}
+
+Result<LoadViewResult> RestCatalog::LoadViewInternal(const TableIdentifier& identifier,
+                                                     auth::AuthSession& session) const {
+  ICEBERG_ENDPOINT_CHECK(supported_endpoints_, Endpoint::LoadView());
+  ICEBERG_ASSIGN_OR_RAISE(auto path, paths_->View(identifier));
+  ICEBERG_ASSIGN_OR_RAISE(const auto response,
+                          client_->Get(path, /*params=*/{}, /*headers=*/{},
+                                       *ViewErrorHandler::Instance(), session));
+  ICEBERG_ASSIGN_OR_RAISE(auto json, FromJsonString(response.body()));
+  return LoadViewResultFromJson(json);
+}
+
+Result<std::shared_ptr<ViewMetadata>> RestCatalog::LoadView(
+    const TableIdentifier& identifier, auth::AuthSession& session) const {
+  ICEBERG_ASSIGN_OR_RAISE(auto result, LoadViewInternal(identifier, session));
+  return std::move(result.metadata);
+}
+
+Result<std::shared_ptr<ViewMetadata>> RestCatalog::CreateView(
+    const TableIdentifier& identifier, const ViewVersion& version,
+    const std::shared_ptr<Schema>& schema, const std::string& location,
+    const std::unordered_map<std::string, std::string>& properties,
+    auth::AuthSession& session) {
+  ICEBERG_ENDPOINT_CHECK(supported_endpoints_, Endpoint::CreateView());
+  ICEBERG_ASSIGN_OR_RAISE(auto path, paths_->Views(identifier.ns));
+
+  CreateViewRequest request{
+      .name = identifier.name,
+      .location = location,
+      .schema = schema,
+      .view_version = std::make_shared<ViewVersion>(version),
+      .properties = properties,
+  };
+  ICEBERG_RETURN_UNEXPECTED(request.Validate());
+  ICEBERG_ASSIGN_OR_RAISE(auto request_json, ToJson(request));
+  ICEBERG_ASSIGN_OR_RAISE(auto json_request, ToJsonString(request_json));
+  ICEBERG_ASSIGN_OR_RAISE(const auto response,
+                          client_->Post(path, json_request, /*headers=*/{},
+                                        *ViewErrorHandler::Instance(), session));
+
+  ICEBERG_ASSIGN_OR_RAISE(auto json, FromJsonString(response.body()));
+  ICEBERG_ASSIGN_OR_RAISE(auto load_result, LoadViewResultFromJson(json));
+  return std::move(load_result.metadata);
+}
+
+Result<std::shared_ptr<ViewMetadata>> RestCatalog::ReplaceView(
+    const TableIdentifier& identifier,
+    const std::vector<std::unique_ptr<ViewRequirement>>& requirements,
+    const std::vector<std::unique_ptr<ViewUpdate>>& updates, auth::AuthSession& session) {
+  ICEBERG_ENDPOINT_CHECK(supported_endpoints_, Endpoint::ReplaceView());
+  ICEBERG_ASSIGN_OR_RAISE(auto path, paths_->View(identifier));
+
+  CommitViewRequest request{.identifier = identifier};
+  request.requirements.reserve(requirements.size());
+  for (const auto& requirement : requirements) {
+    request.requirements.push_back(requirement->Clone());
+  }
+  request.updates.reserve(updates.size());
+  for (const auto& update : updates) {
+    request.updates.push_back(update->Clone());
+  }
+
+  ICEBERG_ASSIGN_OR_RAISE(auto request_json, ToJson(request));
+  ICEBERG_ASSIGN_OR_RAISE(auto json_request, ToJsonString(request_json));
+  ICEBERG_ASSIGN_OR_RAISE(const auto response,
+                          client_->Post(path, json_request, /*headers=*/{},
+                                        *ViewCommitErrorHandler::Instance(), session));
+
+  ICEBERG_ASSIGN_OR_RAISE(auto json, FromJsonString(response.body()));
+  ICEBERG_ASSIGN_OR_RAISE(auto load_result, LoadViewResultFromJson(json));
+  return std::move(load_result.metadata);
+}
+
+Result<bool> RestCatalog::ViewExists(const TableIdentifier& identifier,
+                                     auth::AuthSession& session) const {
+  if (!supported_endpoints_.contains(Endpoint::ViewExists())) {
+    // Fall back to call LoadView
+    return CaptureNoSuchView(LoadViewInternal(identifier, session));
+  }
+
+  ICEBERG_ASSIGN_OR_RAISE(auto path, paths_->View(identifier));
+  return CaptureNoSuchView(
+      client_->Head(path, /*headers=*/{}, *ViewErrorHandler::Instance(), session));
+}
+
+Status RestCatalog::DropView(const TableIdentifier& identifier,
+                             auth::AuthSession& session) {
+  ICEBERG_ENDPOINT_CHECK(supported_endpoints_, Endpoint::DeleteView());
+  ICEBERG_ASSIGN_OR_RAISE(auto path, paths_->View(identifier));
+  ICEBERG_ASSIGN_OR_RAISE(const auto response,
+                          client_->Delete(path, /*params=*/{}, /*headers=*/{},
+                                          *ViewErrorHandler::Instance(), session));
+  return {};
+}
+
+Status RestCatalog::RenameView(const TableIdentifier& from, const TableIdentifier& to,
+                               auth::AuthSession& session) {
+  ICEBERG_ENDPOINT_CHECK(supported_endpoints_, Endpoint::RenameView());
+  ICEBERG_ASSIGN_OR_RAISE(auto path, paths_->RenameView());
+
+  RenameTableRequest request{.source = from, .destination = to};
+  ICEBERG_ASSIGN_OR_RAISE(auto json_request, ToJsonString(ToJson(request)));
+  ICEBERG_ASSIGN_OR_RAISE(const auto response,
+                          client_->Post(path, json_request, /*headers=*/{},
+                                        *ViewErrorHandler::Instance(), session));
+  return {};
 }
 
 Result<std::shared_ptr<Table>> RestCatalog::MakeTableFromLoadResult(
